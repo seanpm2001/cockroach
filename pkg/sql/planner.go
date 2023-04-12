@@ -40,6 +40,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
+	"github.com/cockroachdb/cockroach/pkg/sql/regions"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/transform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -262,12 +264,15 @@ type planner struct {
 
 	// evalCatalogBuiltins is used as part of the eval.Context.
 	evalCatalogBuiltins evalcatalog.Builtins
+
+	// trackDependency is used to track circular dependencies when dropping views.
+	trackDependency map[catid.DescID]bool
 }
 
 // hasFlowForPausablePortal returns true if the planner is for re-executing a
 // portal. We reuse the flow stored in p.pausablePortal.pauseInfo.
 func (p *planner) hasFlowForPausablePortal() bool {
-	return p.pausablePortal != nil && p.pausablePortal.pauseInfo != nil && p.pausablePortal.pauseInfo.flow != nil
+	return p.pausablePortal != nil && p.pausablePortal.pauseInfo != nil && p.pausablePortal.pauseInfo.resumableFlow.flow != nil
 }
 
 // resumeFlowForPausablePortal is called when re-executing a portal. We reuse
@@ -277,8 +282,12 @@ func (p *planner) resumeFlowForPausablePortal(recv *DistSQLReceiver) error {
 		return errors.AssertionFailedf("no flow found for pausable portal")
 	}
 	recv.discardRows = p.instrumentation.ShouldDiscardRows()
-	recv.outputTypes = p.pausablePortal.pauseInfo.outputTypes
-	p.pausablePortal.pauseInfo.flow.Resume(recv)
+	recv.outputTypes = p.pausablePortal.pauseInfo.resumableFlow.outputTypes
+	flow := p.pausablePortal.pauseInfo.resumableFlow.flow
+	finishedSetupFn, cleanup := getFinishedSetupFn(p)
+	finishedSetupFn(flow)
+	defer cleanup()
+	flow.Resume(recv)
 	return recv.commErr
 }
 
@@ -620,6 +629,14 @@ func (p *planner) InternalSQLTxn() descs.Txn {
 		p.internalSQLTxn.init(p.txn, ie)
 	}
 	return &p.internalSQLTxn
+}
+
+func (p *planner) regionsProvider() *regions.Provider {
+	if txn := p.InternalSQLTxn(); txn != nil {
+		_ = txn.Regions() // force initialization
+		return p.internalSQLTxn.extraTxnState.regionsProvider
+	}
+	return nil
 }
 
 func (p *planner) User() username.SQLUsername {

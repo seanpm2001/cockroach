@@ -212,8 +212,7 @@ func TestStreamConnectionTimeout(t *testing.T) {
 	// Register a flow with a very low timeout. After it times out, we'll attempt
 	// to connect a stream, but it'll be too late.
 	id1 := execinfrapb.FlowID{UUID: uuid.MakeV4()}
-	f1 := &FlowBase{}
-	f1.mu.ctxCancel = func() {}
+	f1 := &FlowBase{ctxCancel: func() {}}
 	streamID1 := execinfrapb.StreamID(1)
 	consumer := &distsqlutils.RowBuffer{}
 	wg := &sync.WaitGroup{}
@@ -371,8 +370,7 @@ func TestFlowRegistryDrain(t *testing.T) {
 	ctx := context.Background()
 	reg := NewFlowRegistry()
 
-	flow := &FlowBase{}
-	flow.mu.ctxCancel = func() {}
+	flow := &FlowBase{ctxCancel: func() {}}
 	id := execinfrapb.FlowID{UUID: uuid.MakeV4()}
 	registerFlow := func(t *testing.T, id execinfrapb.FlowID) {
 		t.Helper()
@@ -708,10 +706,9 @@ func TestErrorOnSlowHandshake(t *testing.T) {
 	flowID := execinfrapb.FlowID{UUID: uuid.MakeV4()}
 	streamID := execinfrapb.StreamID(1)
 	cancelCh := make(chan struct{})
-	f := &FlowBase{}
-	f.mu.ctxCancel = func() {
+	f := &FlowBase{ctxCancel: func() {
 		cancelCh <- struct{}{}
-	}
+	}}
 
 	serverStream, _ /* clientStream */, cleanup := createDummyStream(t)
 	defer cleanup()

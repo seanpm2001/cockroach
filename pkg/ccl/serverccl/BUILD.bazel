@@ -47,7 +47,6 @@ go_test(
     args = ["-test.timeout=3595s"],
     data = glob(["testdata/**"]),
     embed = [":serverccl"],
-    tags = ["ccl_test"],
     deps = [
         "//pkg/base",
         "//pkg/ccl",
@@ -56,6 +55,7 @@ go_test(
         "//pkg/clusterversion",
         "//pkg/kv/kvserver/liveness",
         "//pkg/kv/kvserver/liveness/livenesspb",
+        "//pkg/multitenant/tenantcapabilities",
         "//pkg/roachpb",
         "//pkg/security",
         "//pkg/security/password",

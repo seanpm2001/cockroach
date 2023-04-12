@@ -46,6 +46,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -576,9 +577,11 @@ func (dsp *DistSQLPlanner) setupFlows(
 	// and we do so in a separate goroutine.
 	//
 	// We need to synchronize the new goroutine with flow.Cleanup() being called
-	// since flow.Cleanup() is the last thing before DistSQLPlanner.Run returns
-	// at which point the rowResultWriter is no longer protected by the mutex of
-	// the DistSQLReceiver.
+	// for two reasons:
+	// - flow.Cleanup() is the last thing before DistSQLPlanner.Run returns at
+	// which point the rowResultWriter is no longer protected by the mutex of
+	// the DistSQLReceiver
+	// - flow.Cancel can only be called before flow.Cleanup.
 	cleanupCalledMu := struct {
 		syncutil.Mutex
 		called bool
@@ -606,6 +609,8 @@ func (dsp *DistSQLPlanner) setupFlows(
 				seenError = true
 				func() {
 					cleanupCalledMu.Lock()
+					// Flow.Cancel cannot be called after or concurrently with
+					// Flow.Cleanup.
 					defer cleanupCalledMu.Unlock()
 					if cleanupCalledMu.called {
 						// Cleanup of the local flow has already been performed,
@@ -782,7 +787,7 @@ func (dsp *DistSQLPlanner) Run(
 		}
 		if localState.MustUseLeafTxn() {
 			// Set up leaf txns using the txnCoordMeta if we need to.
-			tis, err := txn.GetLeafTxnInputState(ctx)
+			tis, err := txn.GetLeafTxnInputStateOrRejectClient(ctx)
 			if err != nil {
 				log.Infof(ctx, "%s: %s", clientRejectedMsg, err)
 				recv.SetError(err)
@@ -852,15 +857,16 @@ func (dsp *DistSQLPlanner) Run(
 
 	var flow flowinfra.Flow
 	var err error
-	if i := planCtx.getPortalPauseInfo(); i != nil && i.flow != nil {
-		flow = i.flow
+	if i := planCtx.getPortalPauseInfo(); i != nil && i.resumableFlow.flow != nil {
+		flow = i.resumableFlow.flow
 	} else {
 		ctx, flow, err = dsp.setupFlows(
 			ctx, evalCtx, planCtx, leafInputState, flows, recv, localState, statementSQL,
 		)
 		if i != nil {
-			i.flow = flow
-			i.outputTypes = plan.GetResultTypes()
+			// TODO(yuzefovich): add a check that this flow runs in a single goroutine.
+			i.resumableFlow.flow = flow
+			i.resumableFlow.outputTypes = plan.GetResultTypes()
 		}
 	}
 
@@ -984,8 +990,8 @@ type DistSQLReceiver struct {
 
 	testingKnobs struct {
 		// pushCallback, if set, will be called every time DistSQLReceiver.Push
-		// is called, with the same arguments.
-		pushCallback func(rowenc.EncDatumRow, *execinfrapb.ProducerMetadata)
+		// or DistSQLReceiver.PushBatch is called, with the same arguments.
+		pushCallback func(rowenc.EncDatumRow, coldata.Batch, *execinfrapb.ProducerMetadata)
 	}
 }
 
@@ -1413,7 +1419,7 @@ func (r *DistSQLReceiver) Push(
 ) execinfra.ConsumerStatus {
 	r.checkConcurrentError()
 	if r.testingKnobs.pushCallback != nil {
-		r.testingKnobs.pushCallback(row, meta)
+		r.testingKnobs.pushCallback(row, nil /* batch */, meta)
 	}
 	if meta != nil {
 		return r.pushMeta(meta)
@@ -1492,6 +1498,9 @@ func (r *DistSQLReceiver) PushBatch(
 	batch coldata.Batch, meta *execinfrapb.ProducerMetadata,
 ) execinfra.ConsumerStatus {
 	r.checkConcurrentError()
+	if r.testingKnobs.pushCallback != nil {
+		r.testingKnobs.pushCallback(nil /* row */, batch, meta)
+	}
 	if meta != nil {
 		return r.pushMeta(meta)
 	}
@@ -1542,16 +1551,16 @@ func (r *DistSQLReceiver) PushBatch(
 var (
 	// ErrLimitedResultNotSupported is an error produced by pgwire
 	// indicating the user attempted to have multiple active portals but
-	// either without setting sql.pgwire.multiple_active_portals.enabled to
+	// either without setting session variable multiple_active_portals_enabled to
 	// true or the underlying query does not satisfy the restriction.
 	ErrLimitedResultNotSupported = unimplemented.NewWithIssue(
 		40195,
 		"multiple active portals not supported, "+
-			"please set sql.pgwire.multiple_active_portals.enabled to true. "+
+			"please set session variable multiple_active_portals_enabled to true. "+
 			"Note: this feature is in preview",
 	)
 	// ErrStmtNotSupportedForPausablePortal is returned when the user have set
-	// sql.pgwire.multiple_active_portals.enabled to true but set an unsupported
+	// session variable multiple_active_portals_enabled to true but set an unsupported
 	// statement for a portal.
 	ErrStmtNotSupportedForPausablePortal = unimplemented.NewWithIssue(
 		98911,
@@ -1603,7 +1612,15 @@ func (dsp *DistSQLPlanner) PlanAndRunAll(
 	planner *planner,
 	recv *DistSQLReceiver,
 	evalCtxFactory func(usedConcurrently bool) *extendedEvalContext,
-) error {
+) (retErr error) {
+	defer func() {
+		if ppInfo := planCtx.getPortalPauseInfo(); ppInfo != nil && !ppInfo.resumableFlow.cleanup.isComplete {
+			ppInfo.resumableFlow.cleanup.isComplete = true
+		}
+		if retErr != nil && planCtx.getPortalPauseInfo() != nil {
+			planCtx.getPortalPauseInfo().resumableFlow.cleanup.run()
+		}
+	}()
 	if len(planner.curPlan.subqueryPlans) != 0 {
 		// Create a separate memory account for the results of the subqueries.
 		// Note that we intentionally defer the closure of the account until we
@@ -1633,6 +1650,25 @@ func (dsp *DistSQLPlanner) PlanAndRunAll(
 			ctx, evalCtx, planCtx, planner.txn, planner.curPlan.main, recv, finishedSetupFn,
 		)
 	}()
+
+	if p := planCtx.getPortalPauseInfo(); p != nil {
+		if buildutil.CrdbTestBuild && p.resumableFlow.flow == nil {
+			checkErr := errors.AssertionFailedf("flow for portal %s cannot be found", planner.pausablePortal.Name)
+			if recv.commErr != nil {
+				recv.commErr = errors.CombineErrors(recv.commErr, checkErr)
+			} else {
+				return checkErr
+			}
+		}
+		if !p.resumableFlow.cleanup.isComplete {
+			p.resumableFlow.cleanup.appendFunc(namedFunc{
+				fName: "cleanup flow", f: func() {
+					p.resumableFlow.flow.Cleanup(ctx)
+				},
+			})
+		}
+	}
+
 	if recv.commErr != nil || recv.getError() != nil {
 		return recv.commErr
 	}

@@ -47,6 +47,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -1044,10 +1045,10 @@ func fillRange(
 			return
 		}
 		if key == nil || !singleKey {
-			key = append(append([]byte(nil), prefix...), randutil.RandBytes(src, 1000)...)
+			key = append(append([]byte(nil), prefix...), randutil.RandBytes(src, 100)...)
 			key = keys.MakeFamilyKey(key, src.Uint32())
 		}
-		val := randutil.RandBytes(src, 200000)
+		val := randutil.RandBytes(src, int(src.Int31n(1<<8)))
 		pArgs := putArgs(key, val)
 		_, pErr := kv.SendWrappedWith(context.Background(), store, kvpb.Header{
 			RangeID: rangeID,
@@ -1090,7 +1091,7 @@ func TestStoreZoneUpdateAndRangeSplit(t *testing.T) {
 	tdb.Exec(t, "CREATE TABLE t ()")
 	var descID uint32
 	tdb.QueryRow(t, "SELECT 't'::regclass::int").Scan(&descID)
-	const maxBytes, minBytes = 100 << 20, 1 << 14
+	const maxBytes, minBytes = 1 << 16, 1 << 14
 	tdb.Exec(t, "ALTER TABLE t CONFIGURE ZONE USING range_max_bytes = $1, range_min_bytes = $2",
 		maxBytes, minBytes)
 
@@ -1166,7 +1167,7 @@ func TestStoreRangeSplitWithMaxBytesUpdate(t *testing.T) {
 	tdb.Exec(t, "CREATE TABLE t ()")
 	var descID uint32
 	tdb.QueryRow(t, "SELECT 't'::regclass::int").Scan(&descID)
-	const maxBytes, minBytes = 100 << 20, 1 << 14
+	const maxBytes, minBytes = 1 << 16, 1 << 14
 	tdb.Exec(t, "ALTER TABLE t CONFIGURE ZONE USING range_max_bytes = $1, range_min_bytes = $2",
 		maxBytes, minBytes)
 
@@ -2599,6 +2600,7 @@ func TestUnsplittableRange(t *testing.T) {
 				ProtectedTSReaderOverrideFn: spanconfig.EmptyProtectedTSReader,
 			},
 			KeyVisualizer: &keyvisualizer.TestingKnobs{SkipZoneConfigBootstrap: true},
+			SQLStatsKnobs: &sqlstats.TestingKnobs{SkipZoneConfigBootstrap: true},
 		},
 	})
 	s := serv.(*server.TestServer)

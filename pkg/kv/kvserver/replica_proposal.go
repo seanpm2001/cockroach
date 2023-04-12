@@ -12,7 +12,6 @@ package kvserver
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"time"
 	"unsafe"
@@ -563,7 +562,7 @@ func addSSTablePreApply(
 
 	// TODO(tschottdorf): remove this once sideloaded storage guarantees its
 	// existence.
-	if err := eng.MkdirAll(filepath.Dir(ingestPath), os.ModePerm); err != nil {
+	if err := eng.MkdirAll(filepath.Dir(ingestPath)); err != nil {
 		panic(err)
 	}
 	if _, err := eng.Stat(ingestPath); err == nil {

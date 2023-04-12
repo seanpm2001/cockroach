@@ -4931,22 +4931,6 @@ DO NOT USE -- USE 'CREATE TENANT' INSTEAD`,
 		},
 	),
 
-	"crdb_internal.unsafe_optimize_system_database": makeBuiltin(
-		tree.FunctionProperties{
-			Category:     builtinconstants.CategoryMultiRegion,
-			Undocumented: true,
-		},
-		tree.Overload{
-			Types:      tree.ParamTypes{},
-			ReturnType: tree.FixedReturnType(types.Bool),
-			Fn: func(ctx context.Context, evalCtx *eval.Context, args tree.Datums) (tree.Datum, error) {
-				return tree.MakeDBool(tree.DBool(true)), evalCtx.Regions.OptimizeSystemDatabase(ctx)
-			},
-			Info:       "Configures the sytem database to reduce latency during start up",
-			Volatility: volatility.Volatile,
-		},
-	),
-
 	// destroy_tenant is preserved for compatibility with CockroachCloud
 	// intrusion for v22.2 and previous versions.
 	"crdb_internal.destroy_tenant": makeBuiltin(
@@ -5393,6 +5377,15 @@ DO NOT USE -- USE 'CREATE TENANT' INSTEAD`,
 			Undocumented: true,
 		},
 		tree.Overload{
+			Types:      tree.ParamTypes{},
+			ReturnType: tree.FixedReturnType(types.BytesArray),
+			Fn: func(_ context.Context, evalCtx *eval.Context, _ tree.Datums) (tree.Datum, error) {
+				return spanToDatum(evalCtx.Codec.TenantSpan())
+			},
+			Info:       "This function returns the span that contains the keys for the current tenant.",
+			Volatility: volatility.Immutable,
+		},
+		tree.Overload{
 			Types: tree.ParamTypes{
 				{Name: "tenant_id", Typ: types.Int},
 			},
@@ -5432,18 +5425,10 @@ DO NOT USE -- USE 'CREATE TENANT' INSTEAD`,
 					return nil, err
 				}
 				start := keys.MakeTenantPrefix(tid)
-				end := start.PrefixEnd()
-
-				result := tree.NewDArray(types.Bytes)
-				if err := result.Append(tree.NewDBytes(tree.DBytes(start))); err != nil {
-					return nil, err
-				}
-
-				if err := result.Append(tree.NewDBytes(tree.DBytes(end))); err != nil {
-					return nil, err
-				}
-
-				return result, nil
+				return spanToDatum(roachpb.Span{
+					Key:    start,
+					EndKey: start.PrefixEnd(),
+				})
 			},
 			Info:       "This function returns the span that contains the keys for the given tenant.",
 			Volatility: volatility.Immutable,
@@ -5462,18 +5447,10 @@ DO NOT USE -- USE 'CREATE TENANT' INSTEAD`,
 				tabID := uint32(tree.MustBeDInt(args[0]))
 
 				start := evalCtx.Codec.TablePrefix(tabID)
-				end := start.PrefixEnd()
-
-				result := tree.NewDArray(types.Bytes)
-				if err := result.Append(tree.NewDBytes(tree.DBytes(start))); err != nil {
-					return nil, err
-				}
-
-				if err := result.Append(tree.NewDBytes(tree.DBytes(end))); err != nil {
-					return nil, err
-				}
-
-				return result, nil
+				return spanToDatum(roachpb.Span{
+					Key:    start,
+					EndKey: start.PrefixEnd(),
+				})
 			},
 			Info:       "This function returns the span that contains the keys for the given table.",
 			Volatility: volatility.Leakproof,
@@ -5496,18 +5473,10 @@ DO NOT USE -- USE 'CREATE TENANT' INSTEAD`,
 				start := roachpb.Key(rowenc.MakeIndexKeyPrefix(evalCtx.Codec,
 					catid.DescID(tabID),
 					catid.IndexID(indexID)))
-				end := start.PrefixEnd()
-
-				result := tree.NewDArray(types.Bytes)
-				if err := result.Append(tree.NewDBytes(tree.DBytes(start))); err != nil {
-					return nil, err
-				}
-
-				if err := result.Append(tree.NewDBytes(tree.DBytes(end))); err != nil {
-					return nil, err
-				}
-
-				return result, nil
+				return spanToDatum(roachpb.Span{
+					Key:    start,
+					EndKey: start.PrefixEnd(),
+				})
 			},
 			Info:       "This function returns the span that contains the keys for the given index.",
 			Volatility: volatility.Leakproof,
@@ -7602,7 +7571,7 @@ expires until the statement bundle is collected`,
 			},
 			types.String,
 			"Removes constants from a SQL statement. String provided must contain at most "+
-				"1 statement. (Hint: one way to easily quote arbitrary SQL is to use dollar-quotes.)",
+				"1 statement.",
 			volatility.Immutable,
 		),
 		tree.Overload{
@@ -7639,8 +7608,7 @@ expires until the statement bundle is collected`,
 				return result, nil
 			},
 			Info: "Hide constants for each element in an array of SQL statements. " +
-				"Note that maximum 1 statement is permitted per string element. (Hint: one way to easily " +
-				"quote arbitrary SQL is to use dollar-quotes.)",
+				"Note that maximum 1 statement is permitted per string element.",
 			Volatility: volatility.Immutable,
 		},
 	),
@@ -7679,8 +7647,7 @@ expires until the statement bundle is collected`,
 			},
 			types.String,
 			"Surrounds constants in SQL statement with redaction markers. String provided must "+
-				"contain at most 1 statement. (Hint: one way to easily quote arbitrary SQL is to use "+
-				"dollar-quotes.)",
+				"contain at most 1 statement.",
 			volatility.Immutable,
 		),
 		tree.Overload{
@@ -7717,8 +7684,7 @@ expires until the statement bundle is collected`,
 				return result, nil
 			},
 			Info: "Surrounds constants with redaction markers for each element in an array of SQL " +
-				"statements. Note that maximum 1 statement is permitted per string element. (Hint: one " +
-				"way to easily quote arbitrary SQL is to use dollar-quotes.)",
+				"statements. Note that maximum 1 statement is permitted per string element.",
 			Volatility: volatility.Immutable,
 		},
 	),
@@ -10503,4 +10469,15 @@ func parseSpan(arg tree.Datum) (roachpb.Span, error) {
 	startKey := []byte(tree.MustBeDBytes(arr.Array[0]))
 	endKey := []byte(tree.MustBeDBytes(arr.Array[1]))
 	return roachpb.Span{Key: startKey, EndKey: endKey}, nil
+}
+
+func spanToDatum(span roachpb.Span) (tree.Datum, error) {
+	result := tree.NewDArray(types.Bytes)
+	if err := result.Append(tree.NewDBytes(tree.DBytes(span.Key))); err != nil {
+		return nil, err
+	}
+	if err := result.Append(tree.NewDBytes(tree.DBytes(span.EndKey))); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

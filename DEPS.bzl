@@ -1555,10 +1555,10 @@ def go_deps():
         patches = [
             "@com_github_cockroachdb_cockroach//build/patches:com_github_cockroachdb_pebble.patch",
         ],
-        sha256 = "9b4e8449e1901c761593ee9720d80d9194485b7e27ffd4e94e2ac1365085ea02",
-        strip_prefix = "github.com/cockroachdb/pebble@v0.0.0-20230328143022-fb9bced4c3d9",
+        sha256 = "f963a32494d37754f682f671622e87ca18011ebc36a1a724d16807cbec0e781a",
+        strip_prefix = "github.com/cockroachdb/pebble@v0.0.0-20230403214621-6de4e6cb70d4",
         urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/cockroachdb/pebble/com_github_cockroachdb_pebble-v0.0.0-20230328143022-fb9bced4c3d9.zip",
+            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/cockroachdb/pebble/com_github_cockroachdb_pebble-v0.0.0-20230403214621-6de4e6cb70d4.zip",
         ],
     )
     go_repository(
@@ -7117,10 +7117,10 @@ def go_deps():
         name = "com_github_pires_go_proxyproto",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/pires/go-proxyproto",
-        sha256 = "ad00aa7f321a1b560d2c6fb33f0bfaf2a0ce056a25c9a756cbd198b655fcbbf9",
-        strip_prefix = "github.com/pires/go-proxyproto@v0.0.0-20191211124218-517ecdf5bb2b",
+        sha256 = "5ba5921ebf2f5d1186268740ebf6e594e4512fcbb503f2974b1038781a5920f8",
+        strip_prefix = "github.com/pires/go-proxyproto@v0.7.0",
         urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/pires/go-proxyproto/com_github_pires_go_proxyproto-v0.0.0-20191211124218-517ecdf5bb2b.zip",
+            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/pires/go-proxyproto/com_github_pires_go_proxyproto-v0.7.0.zip",
         ],
     )
     go_repository(

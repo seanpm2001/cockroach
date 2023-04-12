@@ -19,6 +19,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -663,12 +664,11 @@ func wrapFilesystemMiddleware(opts *pebble.Options) (vfs.FS, io.Closer) {
 	// wraps the filesystem with a layer that times all write-oriented
 	// operations.
 	fs, closer := vfs.WithDiskHealthChecks(opts.FS, diskHealthCheckInterval,
-		func(info vfs.DiskSlowInfo) {
+		func(name string, opType vfs.OpType, duration time.Duration) {
 			opts.EventListener.DiskSlow(pebble.DiskSlowInfo{
-				Path:      info.Path,
-				OpType:    info.OpType,
-				Duration:  info.Duration,
-				WriteSize: info.WriteSize,
+				Path:     name,
+				OpType:   opType,
+				Duration: duration,
 			})
 		})
 	// If we encounter ENOSPC, exit with an informative exit code.
@@ -731,8 +731,6 @@ type EncryptionStatsHandler interface {
 
 // Pebble is a wrapper around a Pebble database instance.
 type Pebble struct {
-	vfs.FS
-
 	atomic struct {
 		// compactionConcurrency is the current compaction concurrency set on
 		// the Pebble store. The compactionConcurrency option in the Pebble
@@ -768,8 +766,13 @@ type Pebble struct {
 	diskStallCount       int64
 	sharedBytesRead      int64
 	sharedBytesWritten   int64
+	iterStats            struct {
+		syncutil.Mutex
+		AggregatedIteratorStats
+	}
 
 	// Relevant options copied over from pebble.Options.
+	fs            vfs.FS
 	unencryptedFS vfs.FS
 	logCtx        context.Context
 	logger        pebble.LoggerAndTracer
@@ -1013,7 +1016,6 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 	storeProps := computeStoreProperties(ctx, cfg.Dir, opts.ReadOnly, encryptionEnv != nil /* encryptionEnabled */)
 
 	p = &Pebble{
-		FS:               opts.FS,
 		readOnly:         opts.ReadOnly,
 		path:             cfg.Dir,
 		auxDir:           auxDir,
@@ -1025,6 +1027,7 @@ func NewPebble(ctx context.Context, cfg PebbleConfig) (p *Pebble, err error) {
 		settings:         cfg.Settings,
 		encryption:       encryptionEnv,
 		fileRegistry:     fileRegistry,
+		fs:               opts.FS,
 		unencryptedFS:    unencryptedFS,
 		logger:           opts.LoggerAndTracer,
 		logCtx:           logCtx,
@@ -1306,6 +1309,21 @@ func (p *Pebble) Close() {
 	}
 }
 
+// aggregateIterStats is propagated to all of an engine's iterators, aggregating
+// iterator stats when an iterator is closed or its stats are reset. These
+// aggregated stats are exposed through GetMetrics.
+func (p *Pebble) aggregateIterStats(stats IteratorStats) {
+	p.iterStats.Lock()
+	defer p.iterStats.Unlock()
+	p.iterStats.BlockBytes += stats.Stats.InternalStats.BlockBytes
+	p.iterStats.BlockBytesInCache += stats.Stats.InternalStats.BlockBytesInCache
+	p.iterStats.BlockReadDuration += stats.Stats.InternalStats.BlockReadDuration
+	p.iterStats.ExternalSeeks += stats.Stats.ForwardSeekCount[pebble.InterfaceCall] + stats.Stats.ReverseSeekCount[pebble.InterfaceCall]
+	p.iterStats.ExternalSteps += stats.Stats.ForwardStepCount[pebble.InterfaceCall] + stats.Stats.ReverseStepCount[pebble.InterfaceCall]
+	p.iterStats.InternalSeeks += stats.Stats.ForwardSeekCount[pebble.InternalIterCall] + stats.Stats.ReverseSeekCount[pebble.InternalIterCall]
+	p.iterStats.InternalSteps += stats.Stats.ForwardStepCount[pebble.InternalIterCall] + stats.Stats.ReverseStepCount[pebble.InternalIterCall]
+}
+
 // Closed implements the Engine interface.
 func (p *Pebble) Closed() bool {
 	return p.closed
@@ -1338,13 +1356,13 @@ func (p *Pebble) NewMVCCIterator(iterKind MVCCIterKind, opts IterOptions) MVCCIt
 		return maybeWrapInUnsafeIter(iter)
 	}
 
-	iter := newPebbleIterator(p.db, opts, StandardDurability)
+	iter := newPebbleIterator(p.db, opts, StandardDurability, p)
 	return maybeWrapInUnsafeIter(iter)
 }
 
 // NewEngineIterator implements the Engine interface.
 func (p *Pebble) NewEngineIterator(opts IterOptions) EngineIterator {
-	return newPebbleIterator(p.db, opts, StandardDurability)
+	return newPebbleIterator(p.db, opts, StandardDurability, p)
 }
 
 // ConsistentIterators implements the Engine interface.
@@ -1729,9 +1747,8 @@ func (p *Pebble) Flush() error {
 
 // GetMetrics implements the Engine interface.
 func (p *Pebble) GetMetrics() Metrics {
-	m := p.db.Metrics()
-	return Metrics{
-		Metrics:                 m,
+	m := Metrics{
+		Metrics:                 p.db.Metrics(),
 		WriteStallCount:         atomic.LoadInt64(&p.writeStallCount),
 		WriteStallDuration:      time.Duration(atomic.LoadInt64((*int64)(&p.writeStallDuration))),
 		DiskSlowCount:           atomic.LoadInt64(&p.diskSlowCount),
@@ -1739,6 +1756,10 @@ func (p *Pebble) GetMetrics() Metrics {
 		SharedStorageReadBytes:  atomic.LoadInt64(&p.sharedBytesRead),
 		SharedStorageWriteBytes: atomic.LoadInt64(&p.sharedBytesWritten),
 	}
+	p.iterStats.Lock()
+	m.Iterator = p.iterStats.AggregatedIteratorStats
+	p.iterStats.Unlock()
+	return m
 }
 
 // GetEncryptionRegistries implements the Engine interface.
@@ -1813,7 +1834,7 @@ func (p *Pebble) GetEnvStats() (*EnvStats, error) {
 		}
 		stats.ActiveKeyFiles++
 
-		filename := p.FS.PathBase(filePath)
+		filename := p.fs.PathBase(filePath)
 		numStr := strings.TrimSuffix(filename, ".sst")
 		if len(numStr) == len(filename) {
 			continue // not a sstable
@@ -1834,7 +1855,7 @@ func (p *Pebble) GetAuxiliaryDir() string {
 
 // NewBatch implements the Engine interface.
 func (p *Pebble) NewBatch() Batch {
-	return newPebbleBatch(p.db, p.db.NewIndexedBatch(), false /* writeOnly */, p.settings)
+	return newPebbleBatch(p.db, p.db.NewIndexedBatch(), false /* writeOnly */, p.settings, p)
 }
 
 // NewReadOnly implements the Engine interface.
@@ -1844,12 +1865,12 @@ func (p *Pebble) NewReadOnly(durability DurabilityRequirement) ReadWriter {
 
 // NewUnindexedBatch implements the Engine interface.
 func (p *Pebble) NewUnindexedBatch() Batch {
-	return newPebbleBatch(p.db, p.db.NewBatch(), false /* writeOnly */, p.settings)
+	return newPebbleBatch(p.db, p.db.NewBatch(), false /* writeOnly */, p.settings, p)
 }
 
 // NewWriteBatch implements the Engine interface.
 func (p *Pebble) NewWriteBatch() WriteBatch {
-	return newPebbleBatch(p.db, p.db.NewBatch(), true /* writeOnly */, p.settings)
+	return newPebbleBatch(p.db, p.db.NewBatch(), true /* writeOnly */, p.settings, p)
 }
 
 // NewSnapshot implements the Engine interface.
@@ -1910,7 +1931,68 @@ func (p *Pebble) RegisterFlushCompletedCallback(cb func()) {
 	p.mu.Unlock()
 }
 
-var _ vfs.FS = &Pebble{}
+// Remove implements the FS interface.
+func (p *Pebble) Remove(filename string) error {
+	return p.fs.Remove(filename)
+}
+
+// RemoveAll implements the Engine interface.
+func (p *Pebble) RemoveAll(dir string) error {
+	return p.fs.RemoveAll(dir)
+}
+
+// Link implements the FS interface.
+func (p *Pebble) Link(oldname, newname string) error {
+	return p.fs.Link(oldname, newname)
+}
+
+var _ fs.FS = &Pebble{}
+
+// Create implements the FS interface.
+func (p *Pebble) Create(name string) (fs.File, error) {
+	return p.fs.Create(name)
+}
+
+// CreateWithSync implements the FS interface.
+func (p *Pebble) CreateWithSync(name string, bytesPerSync int) (fs.File, error) {
+	f, err := p.fs.Create(name)
+	if err != nil {
+		return nil, err
+	}
+	return vfs.NewSyncingFile(f, vfs.SyncingFileOptions{BytesPerSync: bytesPerSync}), nil
+}
+
+// Open implements the FS interface.
+func (p *Pebble) Open(name string) (fs.File, error) {
+	return p.fs.Open(name)
+}
+
+// OpenDir implements the FS interface.
+func (p *Pebble) OpenDir(name string) (fs.File, error) {
+	return p.fs.OpenDir(name)
+}
+
+// Rename implements the FS interface.
+func (p *Pebble) Rename(oldname, newname string) error {
+	return p.fs.Rename(oldname, newname)
+}
+
+// MkdirAll implements the FS interface.
+func (p *Pebble) MkdirAll(name string) error {
+	return p.fs.MkdirAll(name, 0755)
+}
+
+// List implements the FS interface.
+func (p *Pebble) List(name string) ([]string, error) {
+	dirents, err := p.fs.List(name)
+	sort.Strings(dirents)
+	return dirents, err
+}
+
+// Stat implements the FS interface.
+func (p *Pebble) Stat(name string) (os.FileInfo, error) {
+	return p.fs.Stat(name)
+}
 
 func checkpointSpansNote(spans []roachpb.Span) []byte {
 	note := "CRDB spans:\n"
@@ -1944,7 +2026,7 @@ func (p *Pebble) CreateCheckpoint(dir string, spans []roachpb.Span) error {
 	// TODO(#90543, cockroachdb/pebble#2285): move spans info to Pebble manifest.
 	if len(spans) > 0 {
 		if err := fs.SafeWriteToFile(
-			p.FS, dir, p.FS.PathJoin(dir, "checkpoint.txt"),
+			p.fs, dir, p.fs.PathJoin(dir, "checkpoint.txt"),
 			checkpointSpansNote(spans),
 		); err != nil {
 			return err
@@ -2158,13 +2240,16 @@ func (p *pebbleReadOnly) NewMVCCIterator(iterKind MVCCIterKind, opts IterOptions
 		iter = &p.prefixIter
 	}
 	if iter.inuse {
-		return newPebbleIteratorByCloning(p.iter, opts, p.durability)
+		return newPebbleIteratorByCloning(CloneContext{
+			rawIter:       p.iter,
+			statsReporter: p.parent,
+		}, opts, p.durability)
 	}
 
 	if iter.iter != nil {
 		iter.setOptions(opts, p.durability)
 	} else {
-		iter.initReuseOrCreate(p.parent.db, p.iter, p.iterUsed, opts, p.durability)
+		iter.initReuseOrCreate(p.parent.db, p.iter, p.iterUsed, opts, p.durability, p.parent)
 		if p.iter == nil {
 			// For future cloning.
 			p.iter = iter.iter
@@ -2188,13 +2273,16 @@ func (p *pebbleReadOnly) NewEngineIterator(opts IterOptions) EngineIterator {
 		iter = &p.prefixEngineIter
 	}
 	if iter.inuse {
-		return newPebbleIteratorByCloning(p.iter, opts, p.durability)
+		return newPebbleIteratorByCloning(CloneContext{
+			rawIter:       p.iter,
+			statsReporter: p.parent,
+		}, opts, p.durability)
 	}
 
 	if iter.iter != nil {
 		iter.setOptions(opts, p.durability)
 	} else {
-		iter.initReuseOrCreate(p.parent.db, p.iter, p.iterUsed, opts, p.durability)
+		iter.initReuseOrCreate(p.parent.db, p.iter, p.iterUsed, opts, p.durability, p.parent)
 		if p.iter == nil {
 			// For future cloning.
 			p.iter = iter.iter
@@ -2383,13 +2471,13 @@ func (p *pebbleSnapshot) NewMVCCIterator(iterKind MVCCIterKind, opts IterOptions
 		return maybeWrapInUnsafeIter(iter)
 	}
 
-	iter := MVCCIterator(newPebbleIterator(p.snapshot, opts, StandardDurability))
+	iter := MVCCIterator(newPebbleIterator(p.snapshot, opts, StandardDurability, p.parent))
 	return maybeWrapInUnsafeIter(iter)
 }
 
 // NewEngineIterator implements the Reader interface.
 func (p pebbleSnapshot) NewEngineIterator(opts IterOptions) EngineIterator {
-	return newPebbleIterator(p.snapshot, opts, StandardDurability)
+	return newPebbleIterator(p.snapshot, opts, StandardDurability, p.parent)
 }
 
 // ConsistentIterators implements the Reader interface.

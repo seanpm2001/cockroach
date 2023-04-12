@@ -50,6 +50,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/server/autoconfig/acprovider"
 	"github.com/cockroachdb/cockroach/pkg/server/pgurl"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
@@ -733,19 +734,30 @@ var overrideAlterPrimaryRegionInSuperRegion = settings.RegisterBoolSetting(
 	false,
 ).WithPublic()
 
-var EnableMultipleActivePortals = settings.RegisterBoolSetting(
-	settings.TenantWritable,
-	"sql.pgwire.multiple_active_portals.enabled",
-	"if true, portals with read-only SELECT query without sub/post queries "+
-		"can be executed in interleaving manner, but with local execution plan",
-	false,
-).WithPublic()
-
 var errNoTransactionInProgress = errors.New("there is no transaction in progress")
 var errTransactionInProgress = errors.New("there is already a transaction in progress")
 
 const sqlTxnName string = "sql txn"
 const metricsSampleInterval = 10 * time.Second
+
+// enableDropTenant (or rather, its inverted boolean value) defines
+// the default value for the session var "disable_drop_tenant".
+//
+// Note:
+//   - We use a cluster setting here instead of a default role option
+//     because we need this to be settable also for the 'admin' role.
+//   - The cluster setting is named "enable" because boolean cluster
+//     settings are all ".enabled" -- we do not have ".disabled"
+//     settings anywhere.
+//   - The session var is named "disable_" because we want the Go
+//     default value (false) to mean that tenant deletion is enabled.
+//     This is needed for backward-compatibility with Cockroach Cloud.
+var enableDropTenant = settings.RegisterBoolSetting(
+	settings.SystemOnly,
+	"sql.drop_tenant.enabled",
+	"default value (inverted) for the disable_drop_tenant session setting",
+	true,
+)
 
 // Fully-qualified names for metrics.
 var (
@@ -1421,6 +1433,10 @@ type ExecutorConfig struct {
 	NodeDescs kvcoord.NodeDescStore
 
 	TenantCapabilitiesReader SystemTenantOnly[tenantcapabilities.Reader]
+
+	// AutoConfigProvider informs the auto config runner job of new
+	// tasks to run.
+	AutoConfigProvider acprovider.Provider
 }
 
 // UpdateVersionSystemSettingHook provides a callback that allows us
@@ -1566,8 +1582,8 @@ type ExecutorTestingKnobs struct {
 	// DistSQLReceiverPushCallbackFactory, if set, will be called every time a
 	// DistSQLReceiver is created for a new query execution, and it should
 	// return, possibly nil, a callback that will be called every time
-	// DistSQLReceiver.Push is called.
-	DistSQLReceiverPushCallbackFactory func(query string) func(rowenc.EncDatumRow, *execinfrapb.ProducerMetadata)
+	// DistSQLReceiver.Push or DistSQLReceiver.PushBatch is called.
+	DistSQLReceiverPushCallbackFactory func(query string) func(rowenc.EncDatumRow, coldata.Batch, *execinfrapb.ProducerMetadata)
 
 	// OnTxnRetry, if set, will be called if there is a transaction retry.
 	OnTxnRetry func(autoRetryReason error, evalCtx *eval.Context)
@@ -2100,6 +2116,7 @@ type SessionDefaults map[string]string
 type SessionArgs struct {
 	User                        username.SQLUsername
 	IsSuperuser                 bool
+	IsSSL                       bool
 	SystemIdentity              username.SQLUsername
 	SessionDefaults             SessionDefaults
 	CustomOptionSessionDefaults SessionDefaults
@@ -3156,6 +3173,10 @@ func (m *sessionDataMutator) SetSafeUpdates(val bool) {
 	m.data.SafeUpdates = val
 }
 
+func (m *sessionDataMutator) SetDisableDropTenant(val bool) {
+	m.data.DisableDropTenant = val
+}
+
 func (m *sessionDataMutator) SetCheckFunctionBodies(val bool) {
 	m.data.CheckFunctionBodies = val
 }
@@ -3510,6 +3531,10 @@ func (m *sessionDataMutator) SetPreparedStatementsCacheSize(val int64) {
 
 func (m *sessionDataMutator) SetStreamerEnabled(val bool) {
 	m.data.StreamerEnabled = val
+}
+
+func (m *sessionDataMutator) SetMultipleActivePortalsEnabled(val bool) {
+	m.data.MultipleActivePortalsEnabled = val
 }
 
 // Utility functions related to scrubbing sensitive information on SQL Stats.

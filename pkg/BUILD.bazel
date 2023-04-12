@@ -40,6 +40,8 @@ ALL_TESTS = [
     "//pkg/ccl/jobsccl/jobsprotectedtsccl:jobsprotectedtsccl_test",
     "//pkg/ccl/jwtauthccl:jwtauthccl_test",
     "//pkg/ccl/kvccl/kvfollowerreadsccl:kvfollowerreadsccl_test",
+    "//pkg/ccl/kvccl/kvtenantccl/upgradeccl:upgradeccl_test",
+    "//pkg/ccl/kvccl/kvtenantccl/upgradeinterlockccl:upgradeinterlockccl_test",
     "//pkg/ccl/kvccl/kvtenantccl:kvtenantccl_test",
     "//pkg/ccl/logictestccl/tests/3node-tenant-multiregion:3node-tenant-multiregion_test",
     "//pkg/ccl/logictestccl/tests/3node-tenant:3node-tenant_test",
@@ -254,8 +256,8 @@ ALL_TESTS = [
     "//pkg/kv/kvserver:kvserver_test",
     "//pkg/kv:kv_test",
     "//pkg/multitenant/tenantcapabilities/tenantcapabilitiesauthorizer:tenantcapabilitiesauthorizer_test",
-    "//pkg/multitenant/tenantcapabilities/tenantcapabilitiespb:tenantcapabilitiespb_test",
     "//pkg/multitenant/tenantcapabilities/tenantcapabilitieswatcher:tenantcapabilitieswatcher_test",
+    "//pkg/multitenant/tenantcapabilities:tenantcapabilities_test",
     "//pkg/multitenant/tenantcostmodel:tenantcostmodel_test",
     "//pkg/obsservice/obslib/ingest:ingest_test",
     "//pkg/roachpb:roachpb_disallowed_imports_test",
@@ -275,6 +277,7 @@ ALL_TESTS = [
     "//pkg/security/username:username_disallowed_imports_test",
     "//pkg/security/username:username_test",
     "//pkg/security:security_test",
+    "//pkg/server/autoconfig:autoconfig_test",
     "//pkg/server/debug/goroutineui:goroutineui_test",
     "//pkg/server/debug/pprofui:pprofui_test",
     "//pkg/server/debug:debug_test",
@@ -481,6 +484,7 @@ ALL_TESTS = [
     "//pkg/sql/protoreflect:protoreflect_test",
     "//pkg/sql/querycache:querycache_test",
     "//pkg/sql/randgen:randgen_test",
+    "//pkg/sql/regions:regions_test",
     "//pkg/sql/row:row_disallowed_imports_test",
     "//pkg/sql/row:row_test",
     "//pkg/sql/rowcontainer:rowcontainer_test",
@@ -643,6 +647,7 @@ ALL_TESTS = [
     "//pkg/util/shuffle:shuffle_test",
     "//pkg/util/slidingwindow:slidingwindow_test",
     "//pkg/util/span:span_test",
+    "//pkg/util/startup:startup_test",
     "//pkg/util/stop:stop_test",
     "//pkg/util/stringarena:stringarena_test",
     "//pkg/util/strutil:strutil_test",
@@ -772,6 +777,8 @@ GO_TARGETS = [
     "//pkg/ccl/jwtauthccl:jwtauthccl_test",
     "//pkg/ccl/kvccl/kvfollowerreadsccl:kvfollowerreadsccl",
     "//pkg/ccl/kvccl/kvfollowerreadsccl:kvfollowerreadsccl_test",
+    "//pkg/ccl/kvccl/kvtenantccl/upgradeccl:upgradeccl_test",
+    "//pkg/ccl/kvccl/kvtenantccl/upgradeinterlockccl:upgradeinterlockccl_test",
     "//pkg/ccl/kvccl/kvtenantccl:kvtenantccl",
     "//pkg/ccl/kvccl/kvtenantccl:kvtenantccl_test",
     "//pkg/ccl/kvccl:kvccl",
@@ -1357,11 +1364,11 @@ GO_TARGETS = [
     "//pkg/multitenant/tenantcapabilities/tenantcapabilitiesauthorizer:tenantcapabilitiesauthorizer",
     "//pkg/multitenant/tenantcapabilities/tenantcapabilitiesauthorizer:tenantcapabilitiesauthorizer_test",
     "//pkg/multitenant/tenantcapabilities/tenantcapabilitiespb:tenantcapabilitiespb",
-    "//pkg/multitenant/tenantcapabilities/tenantcapabilitiespb:tenantcapabilitiespb_test",
     "//pkg/multitenant/tenantcapabilities/tenantcapabilitiestestutils:tenantcapabilitiestestutils",
     "//pkg/multitenant/tenantcapabilities/tenantcapabilitieswatcher:tenantcapabilitieswatcher",
     "//pkg/multitenant/tenantcapabilities/tenantcapabilitieswatcher:tenantcapabilitieswatcher_test",
     "//pkg/multitenant/tenantcapabilities:tenantcapabilities",
+    "//pkg/multitenant/tenantcapabilities:tenantcapabilities_test",
     "//pkg/multitenant/tenantcostmodel:tenantcostmodel",
     "//pkg/multitenant/tenantcostmodel:tenantcostmodel_test",
     "//pkg/multitenant:multitenant",
@@ -1427,7 +1434,10 @@ GO_TARGETS = [
     "//pkg/security/username:username_test",
     "//pkg/security:security",
     "//pkg/security:security_test",
+    "//pkg/server/autoconfig/acprovider:acprovider",
+    "//pkg/server/autoconfig/autoconfigpb:autoconfigpb",
     "//pkg/server/autoconfig:autoconfig",
+    "//pkg/server/autoconfig:autoconfig_test",
     "//pkg/server/debug/goroutineui:goroutineui",
     "//pkg/server/debug/goroutineui:goroutineui_test",
     "//pkg/server/debug/pprofui:pprofui",
@@ -1815,6 +1825,8 @@ GO_TARGETS = [
     "//pkg/sql/randgen:randgen_test",
     "//pkg/sql/rangeprober:range_prober",
     "//pkg/sql/rangeprober:rangeprober",
+    "//pkg/sql/regions:regions",
+    "//pkg/sql/regions:regions_test",
     "//pkg/sql/roleoption:roleoption",
     "//pkg/sql/row:row",
     "//pkg/sql/row:row_test",
@@ -2233,6 +2245,8 @@ GO_TARGETS = [
     "//pkg/util/sort:sort",
     "//pkg/util/span:span",
     "//pkg/util/span:span_test",
+    "//pkg/util/startup:startup",
+    "//pkg/util/startup:startup_test",
     "//pkg/util/stop:stop",
     "//pkg/util/stop:stop_test",
     "//pkg/util/stringarena:stringarena",
@@ -2406,6 +2420,8 @@ GET_X_DATA_TARGETS = [
     "//pkg/ccl/kvccl:get_x_data",
     "//pkg/ccl/kvccl/kvfollowerreadsccl:get_x_data",
     "//pkg/ccl/kvccl/kvtenantccl:get_x_data",
+    "//pkg/ccl/kvccl/kvtenantccl/upgradeccl:get_x_data",
+    "//pkg/ccl/kvccl/kvtenantccl/upgradeinterlockccl:get_x_data",
     "//pkg/ccl/logictestccl:get_x_data",
     "//pkg/ccl/logictestccl/tests/3node-tenant:get_x_data",
     "//pkg/ccl/logictestccl/tests/3node-tenant-multiregion:get_x_data",
@@ -2806,6 +2822,8 @@ GET_X_DATA_TARGETS = [
     "//pkg/security/username:get_x_data",
     "//pkg/server:get_x_data",
     "//pkg/server/autoconfig:get_x_data",
+    "//pkg/server/autoconfig/acprovider:get_x_data",
+    "//pkg/server/autoconfig/autoconfigpb:get_x_data",
     "//pkg/server/debug:get_x_data",
     "//pkg/server/debug/goroutineui:get_x_data",
     "//pkg/server/debug/pprofui:get_x_data",
@@ -3033,6 +3051,7 @@ GET_X_DATA_TARGETS = [
     "//pkg/sql/querycache:get_x_data",
     "//pkg/sql/randgen:get_x_data",
     "//pkg/sql/rangeprober:get_x_data",
+    "//pkg/sql/regions:get_x_data",
     "//pkg/sql/roleoption:get_x_data",
     "//pkg/sql/row:get_x_data",
     "//pkg/sql/rowcontainer:get_x_data",
@@ -3301,6 +3320,7 @@ GET_X_DATA_TARGETS = [
     "//pkg/util/slidingwindow:get_x_data",
     "//pkg/util/sort:get_x_data",
     "//pkg/util/span:get_x_data",
+    "//pkg/util/startup:get_x_data",
     "//pkg/util/stop:get_x_data",
     "//pkg/util/stringarena:get_x_data",
     "//pkg/util/stringencoding:get_x_data",
@@ -3386,20 +3406,9 @@ test_suite(
 )
 
 test_suite(
-    name = "ccl_tests",
+    name = "small_tests",
     tags = [
         "-broken_in_bazel",
-        "-integration",
-        "ccl_test",
-    ],
-    tests = ALL_TESTS,
-)
-
-test_suite(
-    name = "small_non_ccl_tests",
-    tags = [
-        "-broken_in_bazel",
-        "-ccl_test",
         "-flaky",
         "-integration",
         "small",
@@ -3408,10 +3417,9 @@ test_suite(
 )
 
 test_suite(
-    name = "medium_non_ccl_tests",
+    name = "medium_tests",
     tags = [
         "-broken_in_bazel",
-        "-ccl_test",
         "-flaky",
         "-integration",
         "medium",
@@ -3420,10 +3428,9 @@ test_suite(
 )
 
 test_suite(
-    name = "large_non_ccl_tests",
+    name = "large_tests",
     tags = [
         "-broken_in_bazel",
-        "-ccl_test",
         "-flaky",
         "-integration",
         "large",
@@ -3432,10 +3439,9 @@ test_suite(
 )
 
 test_suite(
-    name = "enormous_non_ccl_tests",
+    name = "enormous_tests",
     tags = [
         "-broken_in_bazel",
-        "-ccl_test",
         "-flaky",
         "-integration",
         "enormous",

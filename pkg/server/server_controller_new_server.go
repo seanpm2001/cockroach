@@ -193,12 +193,15 @@ func makeSharedProcessTenantServerConfig(
 ) (baseCfg BaseConfig, sqlCfg SQLConfig, err error) {
 	st := cluster.MakeClusterSettings()
 
-	// This version initialization is copied from cli/mt_start_sql.go.
+	// We need a value in the version setting prior to the update
+	// coming from the system.settings table. This value must be valid
+	// and compatible with the state of the tenant's keyspace.
 	//
-	// TODO(knz): Why is this even useful? The comment refers to v21.1
-	// compatibility, yet if we don't do this, the server panics with
-	// "version not initialized". This might be related to:
-	// https://github.com/cockroachdb/cockroach/issues/84587
+	// Since we don't know at which binary version the tenant
+	// keyspace was initialized, we must be conservative and
+	// assume it was created a long time ago; and that we may
+	// have to run all known migrations since then. So initialize
+	// the version setting to the minimum supported version.
 	if err := clusterversion.Initialize(
 		ctx, st.Version.BinaryMinSupportedVersion(), &st.SV,
 	); err != nil {
@@ -319,11 +322,9 @@ func makeSharedProcessTenantServerConfig(
 		baseCfg.InflightTraceDirName = traceDir
 	}
 
-	// TODO(knz): Define a meaningful storage config for each tenant,
-	// see: https://github.com/cockroachdb/cockroach/issues/84588.
 	useStore := kvServerCfg.SQLConfig.TempStorageConfig.Spec
 	tempStorageCfg := base.TempStorageConfigFromEnv(
-		ctx, st, useStore, "" /* parentDir */, kvServerCfg.SQLConfig.TempStorageConfig.Mon.MaximumBytes())
+		ctx, st, useStore, "" /* parentDir */, kvServerCfg.SQLConfig.TempStorageConfig.Mon.Limit())
 	// TODO(knz): Make tempDir configurable.
 	tempDir := useStore.Path
 	if tempStorageCfg.Path, err = fs.CreateTempDir(tempDir, TempDirPrefix, stopper); err != nil {
@@ -338,7 +339,7 @@ func makeSharedProcessTenantServerConfig(
 
 	sqlCfg = MakeSQLConfig(tenantID, tempStorageCfg)
 
-	// Split for each tenant, see https://github.com/cockroachdb/cockroach/issues/84588.
+	baseCfg.Settings.ExternalIODir = kvServerCfg.BaseConfig.Settings.ExternalIODir
 	sqlCfg.ExternalIODirConfig = kvServerCfg.SQLConfig.ExternalIODirConfig
 
 	// Use the internal connector instead of the network.

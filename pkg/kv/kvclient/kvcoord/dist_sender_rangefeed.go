@@ -484,7 +484,6 @@ func (ds *DistSender) partialRangeFeed(
 		if err != nil {
 			return err
 		}
-		ds.metrics.RangefeedRestartRanges.Inc(1)
 		if errInfo.evict {
 			token.Evict(ctx)
 			token = rangecache.EvictionToken{}
@@ -554,14 +553,29 @@ func handleRangefeedError(ctx context.Context, err error) (rangefeedErrorInfo, e
 	}
 }
 
+// catchup alloc is a catchup scan allocation.
+type catchupAlloc func()
+
+// Release implements limit.Reservation
+func (a catchupAlloc) Release() {
+	a()
+}
+
 func acquireCatchupScanQuota(
 	ctx context.Context, ds *DistSender, catchupSem *limit.ConcurrentRequestLimiter,
-) (limit.Reservation, error) {
+) (catchupAlloc, error) {
 	// Indicate catchup scan is starting;  Before potentially blocking on a semaphore, take
 	// opportunity to update semaphore limit.
-	ds.metrics.RangefeedCatchupRanges.Inc(1)
 	catchupSem.SetLimit(maxConcurrentCatchupScans(&ds.st.SV))
-	return catchupSem.Begin(ctx)
+	res, err := catchupSem.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ds.metrics.RangefeedCatchupRanges.Inc(1)
+	return func() {
+		ds.metrics.RangefeedCatchupRanges.Dec(1)
+		res.Release()
+	}, nil
 }
 
 // nweTransportForRange returns Transport for the specified range descriptor.
@@ -677,7 +691,6 @@ func (ds *DistSender) singleRangeFeed(
 	finishCatchupScan := func() {
 		if catchupRes != nil {
 			catchupRes.Release()
-			ds.metrics.RangefeedCatchupRanges.Dec(1)
 			catchupRes = nil
 		}
 	}

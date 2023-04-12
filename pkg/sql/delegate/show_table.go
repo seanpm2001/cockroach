@@ -95,7 +95,7 @@ SELECT
         WHEN NOT has_partitions
           THEN NULL
 				ELSE
-					e'\n-- Warning: Partitioned table with no zone configurations.\n'
+					e'\n-- Warning: Partitioned table with no zone configurations.'
         END
     ) AS create_statement
 FROM

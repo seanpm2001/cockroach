@@ -178,13 +178,16 @@ func (n *createViewNode) startExec(params runParams) error {
 		telemetry.Inc(sqltelemetry.CreateTempViewCounter)
 	}
 
-	privs := catprivilege.CreatePrivilegesFromDefaultPrivileges(
+	privs, err := catprivilege.CreatePrivilegesFromDefaultPrivileges(
 		n.dbDesc.GetDefaultPrivilegeDescriptor(),
 		schema.GetDefaultPrivilegeDescriptor(),
 		n.dbDesc.GetID(),
 		params.SessionData().User(),
 		privilege.Tables,
 	)
+	if err != nil {
+		return err
+	}
 
 	var newDesc *tabledesc.Mutable
 	applyGlobalMultiRegionZoneConfig := false
@@ -341,10 +344,9 @@ func (n *createViewNode) startExec(params runParams) error {
 				}
 				if err := ApplyZoneConfigForMultiRegionTable(
 					params.ctx,
-					params.p.Txn(),
+					params.p.InternalSQLTxn(),
 					params.p.ExecCfg(),
 					params.p.extendedEvalCtx.Tracing.KVTracingEnabled(),
-					params.p.Descriptors(),
 					regionConfig,
 					newDesc,
 					applyZoneConfigForMultiRegionTableOptionTableNewConfig(
@@ -596,11 +598,6 @@ func (p *planner) replaceViewDesc(
 		toReplace.ViewQuery = updatedQuery
 	}
 
-	// Check that the new view has at least as many columns as the old view before
-	// adding result columns.
-	if len(n.columns) < len(toReplace.ClusterVersion().Columns) {
-		return nil, pgerror.Newf(pgcode.InvalidTableDefinition, "cannot drop columns from view")
-	}
 	// Reset the columns to add the new result columns onto.
 	toReplace.Columns = make([]descpb.ColumnDescriptor, 0, len(n.columns))
 	toReplace.NextColumnID = 0

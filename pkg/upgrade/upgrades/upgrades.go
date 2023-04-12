@@ -94,12 +94,6 @@ var upgrades = []upgradebase.Upgrade{
 		"create default databases", // v22_2StartupMigrationName
 	),
 	upgrade.NewTenantUpgrade(
-		"ensure preconditions are met before starting upgrading to v22.2",
-		toCV(clusterversion.TODODelete_V22_2Start),
-		preconditionBeforeStartingAnUpgrade,
-		NoTenantUpgradeFunc,
-	),
-	upgrade.NewTenantUpgrade(
 		"update system.statement_diagnostics_requests to support sampling probabilities",
 		toCV(clusterversion.TODODelete_V22_2SampledStmtDiagReqs),
 		upgrade.NoPrecondition,
@@ -111,22 +105,17 @@ var upgrades = []upgradebase.Upgrade{
 		upgrade.NoPrecondition,
 		systemExternalConnectionsTableMigration,
 	),
-	upgrade.NewTenantUpgrade(
+	upgrade.NewPermanentTenantUpgrade(
 		"add default SQL schema telemetry schedule",
-		toCV(clusterversion.TODODelete_V22_2SQLSchemaTelemetryScheduledJobs),
-		upgrade.NoPrecondition,
+		toCV(clusterversion.Permanent_V22_2SQLSchemaTelemetryScheduledJobs),
 		ensureSQLSchemaTelemetrySchedule,
+		"add default SQL schema telemetry schedule",
 	),
 	upgrade.NewTenantUpgrade(
 		"wait for all in-flight schema changes",
 		toCV(clusterversion.TODODelete_V22_2NoNonMVCCAddSSTable),
 		upgrade.NoPrecondition,
 		waitForAllSchemaChanges,
-	),
-	upgrade.NewTenantUpgrade("fix corrupt user-file related table descriptors",
-		toCV(clusterversion.TODODelete_V22_2FixUserfileRelatedDescriptorCorruption),
-		upgrade.NoPrecondition,
-		fixInvalidObjectsThatLookLikeBadUserfileConstraint,
 	),
 	upgrade.NewTenantUpgrade("add columns to system.tenants and populate a system tenant entry",
 		toCV(clusterversion.V23_1TenantNamesStateAndServiceMode),
@@ -298,15 +287,21 @@ var upgrades = []upgradebase.Upgrade{
 		upgrade.NoPrecondition,
 		createComputedIndexesOnSystemSQLStatistics,
 	),
-	upgrade.NewTenantUpgrade(
+	upgrade.NewPermanentTenantUpgrade(
 		"create statement_activity and transaction_activity tables",
 		toCV(clusterversion.V23_1AddSystemActivityTables),
-		upgrade.NoPrecondition,
 		systemStatisticsActivityTableMigration,
+		"create statement_activity and transaction_activity job",
+	),
+	upgrade.NewPermanentSystemUpgrade(
+		"change TTL for SQL Stats system tables",
+		toCV(clusterversion.V23_1ChangeSQLStatsTTL),
+		sqlStatsTTLChange,
+		"change TTL for SQL Stats system tables",
 	),
 	upgrade.NewTenantUpgrade(
 		"stop writing payload and progress to system.jobs",
-		toCV(clusterversion.V23_2StopWritingPayloadAndProgressToSystemJobs),
+		toCV(clusterversion.V23_1StopWritingPayloadAndProgressToSystemJobs),
 		upgrade.NoPrecondition,
 		alterPayloadColumnToNullable,
 	),

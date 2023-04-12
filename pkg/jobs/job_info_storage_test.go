@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keyvisualizer"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -33,6 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/upgrade/upgradebase"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,11 +65,11 @@ func TestJobInfoAccessors(t *testing.T) {
 	job1 := createJob(1)
 	job2 := createJob(2)
 	job3 := createJob(3)
-	kPrefix, kA, kB, kC, kD := []byte("🔑"), []byte("🔑A"), []byte("🔑B"), []byte("🔑C"), []byte("🔑D")
+	kPrefix, kA, kB, kC, kD := "🔑", "🔑A", "🔑B", "🔑C", "🔑D"
 	v1, v2, v3 := []byte("val1"), []byte("val2"), []byte("val3")
 
 	// Key doesn't exist yet.
-	getJobInfo := func(j *jobs.Job, key []byte) (v []byte, ok bool, err error) {
+	getJobInfo := func(j *jobs.Job, key string) (v []byte, ok bool, err error) {
 		err = idb.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 			infoStorage := j.InfoStorage(txn)
 			v, ok, err = infoStorage.Get(ctx, key)
@@ -145,7 +147,7 @@ func TestJobInfoAccessors(t *testing.T) {
 	var i int
 	require.NoError(t, idb.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := job2.InfoStorage(txn)
-		return infoStorage.Iterate(ctx, kPrefix, func(key, value []byte) error {
+		return infoStorage.Iterate(ctx, kPrefix, func(key string, value []byte) error {
 			i++
 			switch i {
 			case 1:
@@ -169,7 +171,7 @@ func TestJobInfoAccessors(t *testing.T) {
 	i = 0
 	require.NoError(t, idb.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := job2.InfoStorage(txn)
-		return infoStorage.GetLast(ctx, kPrefix, func(key, value []byte) error {
+		return infoStorage.GetLast(ctx, kPrefix, func(key string, value []byte) error {
 			i++
 			require.Equal(t, key, kC)
 			require.Equal(t, v3, value)
@@ -182,7 +184,7 @@ func TestJobInfoAccessors(t *testing.T) {
 	found := false
 	require.NoError(t, idb.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := job2.InfoStorage(txn)
-		return infoStorage.Iterate(ctx, kA, func(key, value []byte) error {
+		return infoStorage.Iterate(ctx, kA, func(key string, value []byte) error {
 			require.Equal(t, kA, key)
 			require.Equal(t, v2, value)
 			found = true
@@ -200,7 +202,7 @@ func TestJobInfoAccessors(t *testing.T) {
 	i = 0
 	require.NoError(t, idb.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := job2.InfoStorage(txn)
-		return infoStorage.Iterate(ctx, kPrefix, func(key, value []byte) error {
+		return infoStorage.Iterate(ctx, kPrefix, func(key string, value []byte) error {
 			i++
 			require.Equal(t, key, kC)
 			return nil
@@ -211,7 +213,7 @@ func TestJobInfoAccessors(t *testing.T) {
 	// Iterate a different job.
 	require.NoError(t, idb.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := job3.InfoStorage(txn)
-		return infoStorage.Iterate(ctx, kPrefix, func(key, value []byte) error {
+		return infoStorage.Iterate(ctx, kPrefix, func(key string, value []byte) error {
 			t.Fatalf("unexpected record for job 3: %v = %v", key, value)
 			return nil
 		})
@@ -259,7 +261,7 @@ func TestAccessorsWithWrongSQLLivenessSession(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, ief.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := job.InfoStorage(txn)
-		return infoStorage.Write(ctx, []byte("foo"), []byte("baz"))
+		return infoStorage.Write(ctx, "foo", []byte("baz"))
 	}))
 
 	require.NoError(t, ief.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
@@ -272,14 +274,14 @@ func TestAccessorsWithWrongSQLLivenessSession(t *testing.T) {
 
 	err = ief.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := job.InfoStorage(txn)
-		return infoStorage.Write(ctx, []byte("foo"), []byte("bar"))
+		return infoStorage.Write(ctx, "foo", []byte("bar"))
 	})
 	require.True(t, testutils.IsError(err, "expected session.*but found"))
 
 	// A Get should still succeed even with an invalid session id.
 	require.NoError(t, ief.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := job.InfoStorage(txn)
-		val, exists, err := infoStorage.Get(ctx, []byte("foo"))
+		val, exists, err := infoStorage.Get(ctx, "foo")
 		if err != nil {
 			return err
 		}
@@ -291,7 +293,7 @@ func TestAccessorsWithWrongSQLLivenessSession(t *testing.T) {
 	// Iterate should still succeed even with an invalid session id.
 	require.NoError(t, ief.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
 		infoStorage := job.InfoStorage(txn)
-		return infoStorage.Iterate(ctx, []byte("foo"), func(infoKey, value []byte) error {
+		return infoStorage.Iterate(ctx, "foo", func(infoKey string, value []byte) error {
 			require.Equal(t, value, []byte("baz"))
 			return nil
 		})
@@ -308,7 +310,6 @@ func TestJobInfoUpgradeRegressionTests(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{
-		DisableDefaultTestTenant: true,
 		Knobs: base.TestingKnobs{
 			Server: &server.TestingKnobs{
 				DisableAutomaticVersionUpgrade: make(chan struct{}),
@@ -318,6 +319,7 @@ func TestJobInfoUpgradeRegressionTests(t *testing.T) {
 			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		},
 	})
+	tenantOrServer := s.TenantOrServer()
 	ctx := context.Background()
 	defer s.Stopper().Stop(ctx)
 
@@ -335,16 +337,81 @@ func TestJobInfoUpgradeRegressionTests(t *testing.T) {
 	runner.CheckQueryResults(t, fmt.Sprintf(`SELECT count(*) FROM system.job_info WHERE job_id = %d`, jobID),
 		[][]string{{"2"}})
 
+	// We are still at a CV before V23_1JobInfoTableIsBackfilled so `SHOW JOBS`
+	// and consequently `crdb_internal.jobs` and `crdb_internal.system_jobs` are
+	// only reading from system.jobs. Ensure we see only one row for the job.
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT count(*) FROM [SHOW JOBS] WHERE job_id = %d", jobID), [][]string{{"1"}})
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT count(*) FROM crdb_internal.jobs WHERE job_id = %d", jobID), [][]string{{"1"}})
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT count(*) FROM crdb_internal.system_jobs WHERE id = %d", jobID), [][]string{{"1"}})
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT count(*) FROM crdb_internal.system_jobs WHERE status = '%s'", jobs.StatusPaused), [][]string{{"1"}})
+
 	_, err = sqlDB.Exec(`SET CLUSTER SETTING version = $1`, clusterversion.V23_1JobInfoTableIsBackfilled.String())
 	require.NoError(t, err)
 
 	runner.CheckQueryResults(t, fmt.Sprintf(`SELECT count(*) FROM system.job_info WHERE job_id = %d`, jobID),
 		[][]string{{"4"}})
 
-	err = s.InternalDB().(isql.DB).Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
-		infoStorage := jobs.InfoStorageForJob(txn, jobID)
-		_, _, err := infoStorage.Get(ctx, jobs.GetLegacyPayloadKey())
-		return err
+	// Once again assert that we only see one row for the job using the different
+	// supported virtual indexes.
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT count(*) FROM [SHOW JOBS] WHERE job_id = %d", jobID), [][]string{{"1"}})
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT count(*) FROM crdb_internal.jobs WHERE job_id = %d", jobID), [][]string{{"1"}})
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT count(*) FROM crdb_internal.system_jobs WHERE id = %d", jobID), [][]string{{"1"}})
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT count(*) FROM crdb_internal.system_jobs WHERE job_type = '%s'", jobspb.TypeBackup), [][]string{{"1"}})
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT count(*) FROM crdb_internal.system_jobs WHERE status = '%s'", jobs.StatusPaused), [][]string{{"1"}})
+
+	// Now that we have 2 rows for each payload and progress, let us test that we
+	// read the latest one. Note, running the Update should also get rid of the
+	// older revisions of the payload and progress.
+	execCfg := tenantOrServer.ExecutorConfig().(sql.ExecutorConfig)
+	j, err := execCfg.JobRegistry.LoadJob(ctx, jobID)
+	require.NoError(t, err)
+	err = j.NoTxn().Update(ctx, func(txn isql.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
+		md.Payload.Description = "updated"
+		md.Progress.TraceID = 123
+		ju.UpdateProgress(md.Progress)
+		ju.UpdatePayload(md.Payload)
+		return nil
 	})
 	require.NoError(t, err)
+
+	err = execCfg.InternalDB.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
+		infoStorage := jobs.InfoStorageForJob(txn, jobID)
+		payloadBytes, _, err := infoStorage.Get(ctx, jobs.GetLegacyPayloadKey())
+		if err != nil {
+			return err
+		}
+		var payload jobspb.Payload
+		require.NoError(t, protoutil.Unmarshal(payloadBytes, &payload))
+		require.Equal(t, payload.Description, "updated")
+
+		progressBytes, _, err := infoStorage.Get(ctx, jobs.GetLegacyProgressKey())
+		if err != nil {
+			return err
+		}
+		var progress jobspb.Progress
+		require.NoError(t, protoutil.Unmarshal(progressBytes, &progress))
+		require.Equal(t, int(progress.TraceID), 123)
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Let the job complete, by virtue of this we get one more update to the
+	// payload + progress.
+	runner.Exec(t, `SET CLUSTER SETTING jobs.debug.pausepoints = ''`)
+	runner.Exec(t, `RESUME JOB $1`, jobID)
+	jobutils.WaitForJobToSucceed(t, runner, jobID)
+
+	// Sanity check that SHOW JOBS shows the latest payload and progress.
+	runner.CheckQueryResults(t, fmt.Sprintf(
+		"SELECT description, status FROM [SHOW JOBS] WHERE job_id = %d", jobID),
+		[][]string{{"updated", string(jobs.StatusSucceeded)}})
 }

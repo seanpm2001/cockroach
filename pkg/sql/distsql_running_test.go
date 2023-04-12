@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
@@ -598,11 +599,11 @@ func TestDistSQLReceiverDrainsMeta(t *testing.T) {
 			UseDatabase: "test",
 			Knobs: base.TestingKnobs{
 				SQLExecutor: &ExecutorTestingKnobs{
-					DistSQLReceiverPushCallbackFactory: func(query string) func(rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
+					DistSQLReceiverPushCallbackFactory: func(query string) func(rowenc.EncDatumRow, coldata.Batch, *execinfrapb.ProducerMetadata) {
 						if query != testQuery {
 							return nil
 						}
-						return func(row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata) {
+						return func(_ rowenc.EncDatumRow, _ coldata.Batch, meta *execinfrapb.ProducerMetadata) {
 							if meta != nil {
 								accumulatedMeta = append(accumulatedMeta, *meta)
 							}
@@ -638,6 +639,14 @@ func TestDistSQLReceiverDrainsMeta(t *testing.T) {
 	p, err := pgtest.NewPGTest(ctx, tc.Server(0).ServingSQLAddr(), username.RootUser)
 	require.NoError(t, err)
 
+	// We disable multiple active portals here as it only supports local-only plan.
+	// TODO(sql-sessions): remove this line when we finish
+	// https://github.com/cockroachdb/cockroach/issues/100822.
+	require.NoError(t, p.SendOneLine(`Query {"String": "SET multiple_active_portals_enabled = false"}`))
+	until := pgtest.ParseMessages("ReadyForQuery")
+	_, err = p.Until(false /* keepErrMsg */, until...)
+	require.NoError(t, err)
+
 	// Execute the test query asking for at most 25 rows.
 	require.NoError(t, p.SendOneLine(`Query {"String": "USE test"}`))
 	require.NoError(t, p.SendOneLine(fmt.Sprintf(`Parse {"Query": "%s"}`, testQuery)))
@@ -648,7 +657,7 @@ func TestDistSQLReceiverDrainsMeta(t *testing.T) {
 	// Retrieve all of the results. We need to receive until two 'ReadyForQuery'
 	// messages are returned (the first one for "USE test" query and the second
 	// one is for the limited portal execution).
-	until := pgtest.ParseMessages("ReadyForQuery\nReadyForQuery")
+	until = pgtest.ParseMessages("ReadyForQuery\nReadyForQuery")
 	msgs, err := p.Until(false /* keepErrMsg */, until...)
 	require.NoError(t, err)
 	received := pgtest.MsgsToJSONWithIgnore(msgs, &datadriven.TestData{})

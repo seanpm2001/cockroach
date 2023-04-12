@@ -1642,7 +1642,7 @@ func (u *sqlSymUnion) showCreateFormatOption() tree.ShowCreateFormatOption {
 %type <privilege.TargetObjectType> target_object_type
 
 // User defined function relevant components.
-%type <bool> opt_or_replace opt_return_set opt_no
+%type <bool> opt_or_replace opt_return_table opt_return_set opt_no
 %type <str> param_name func_as
 %type <tree.FuncParams> opt_func_param_with_default_list func_param_with_default_list func_params func_params_list
 %type <tree.FuncParam> func_param_with_default func_param
@@ -1774,7 +1774,7 @@ stmt_without_legacy_transaction:
 
 // %Help: ALTER
 // %Category: Group
-// %Text: ALTER TABLE, ALTER INDEX, ALTER VIEW, ALTER SEQUENCE, ALTER DATABASE, ALTER USER, ALTER ROLE, ALTER DEFAULT PRIVILEGES, ALTER TENANT
+// %Text: ALTER TABLE, ALTER INDEX, ALTER VIEW, ALTER SEQUENCE, ALTER DATABASE, ALTER USER, ALTER ROLE, ALTER DEFAULT PRIVILEGES
 alter_stmt:
   alter_ddl_stmt      // help texts in sub-rule
 | alter_role_stmt     // EXTEND WITH HELP: ALTER ROLE
@@ -4347,18 +4347,18 @@ comment_text:
 // %Text:
 // CREATE DATABASE, CREATE TABLE, CREATE INDEX, CREATE TABLE AS,
 // CREATE USER, CREATE VIEW, CREATE SEQUENCE, CREATE STATISTICS,
-// CREATE ROLE, CREATE TYPE, CREATE EXTENSION, CREATE TENANT, CREATE SCHEDULE
+// CREATE ROLE, CREATE TYPE, CREATE EXTENSION, CREATE SCHEDULE
 create_stmt:
-  create_role_stmt     // EXTEND WITH HELP: CREATE ROLE
-| create_ddl_stmt      // help texts in sub-rule
-| create_stats_stmt    // EXTEND WITH HELP: CREATE STATISTICS
-| create_changefeed_stmt
+  create_role_stmt       // EXTEND WITH HELP: CREATE ROLE
+| create_ddl_stmt        // help texts in sub-rule
+| create_stats_stmt      // EXTEND WITH HELP: CREATE STATISTICS
+| create_changefeed_stmt // EXTEND WITH HELP: CREATE CHANGEFEED
 | create_extension_stmt  // EXTEND WITH HELP: CREATE EXTENSION
 | create_external_connection_stmt // EXTEND WITH HELP: CREATE EXTERNAL CONNECTION
-| create_tenant_stmt // EXTEND WITH HELP: CREATE TENANT
-| create_schedule_stmt
-| create_unsupported   {}
-| CREATE error         // SHOW HELP: CREATE
+| create_tenant_stmt     // EXTEND WITH HELP: CREATE TENANT
+| create_schedule_stmt   // help texts in sub-rule
+| create_unsupported     {}
+| CREATE error           // SHOW HELP: CREATE
 
 // %Help: CREATE TENANT - create new tenant
 // %Category: Experimental
@@ -4463,8 +4463,8 @@ tenant_replication_options:
 // CREATE SCHEDULE FOR CHANGEFEED
 create_schedule_stmt:
   create_schedule_for_changefeed_stmt // EXTEND WITH HELP: CREATE SCHEDULE FOR CHANGEFEED
-| create_schedule_for_backup_stmt   // EXTEND WITH HELP: CREATE SCHEDULE FOR BACKUP
-| CREATE SCHEDULE error // SHOW HELP: CREATE SCHEDULE
+| create_schedule_for_backup_stmt     // EXTEND WITH HELP: CREATE SCHEDULE FOR BACKUP
+| CREATE SCHEDULE error               // SHOW HELP: CREATE SCHEDULE
 
 // %Help: CREATE EXTENSION - pseudo-statement for PostgreSQL compatibility
 // %Category: Cfg
@@ -4500,7 +4500,8 @@ create_extension_stmt:
 //  } ...
 // %SeeAlso: WEBDOCS/create-function.html
 create_func_stmt:
-  CREATE opt_or_replace FUNCTION func_create_name '(' opt_func_param_with_default_list ')' RETURNS opt_return_set func_return_type
+  CREATE opt_or_replace FUNCTION func_create_name '(' opt_func_param_with_default_list ')'
+  RETURNS opt_return_table opt_return_set func_return_type
   opt_create_func_opt_list opt_routine_body
   {
     name := $4.unresolvedObjectName().ToFunctionName()
@@ -4510,17 +4511,21 @@ create_func_stmt:
       FuncName: name,
       Params: $6.functionParams(),
       ReturnType: tree.FuncReturnType{
-        Type: $10.typeReference(),
-        IsSet: $9.bool(),
+        Type: $11.typeReference(),
+        IsSet: $10.bool(),
       },
-      Options: $11.functionOptions(),
-      RoutineBody: $12.routineBody(),
+      Options: $12.functionOptions(),
+      RoutineBody: $13.routineBody(),
     }
   }
 | CREATE opt_or_replace FUNCTION error // SHOW HELP: CREATE FUNCTION
 
 opt_or_replace:
   OR REPLACE { $$.val = true }
+| /* EMPTY */ { $$.val = false }
+
+opt_return_table:
+  TABLE { return unimplementedWithIssueDetail(sqllex, 100226, "UDF returning TABLE") }
 | /* EMPTY */ { $$.val = false }
 
 opt_return_set:
@@ -5282,13 +5287,13 @@ discard_stmt:
 // DROP DATABASE, DROP INDEX, DROP TABLE, DROP VIEW, DROP SEQUENCE,
 // DROP USER, DROP ROLE, DROP TYPE
 drop_stmt:
-  drop_ddl_stmt      // help texts in sub-rule
-| drop_role_stmt     // EXTEND WITH HELP: DROP ROLE
-| drop_schedule_stmt // EXTEND WITH HELP: DROP SCHEDULES
+  drop_ddl_stmt                 // help texts in sub-rule
+| drop_role_stmt                // EXTEND WITH HELP: DROP ROLE
+| drop_schedule_stmt            // EXTEND WITH HELP: DROP SCHEDULES
 | drop_external_connection_stmt // EXTEND WITH HELP: DROP EXTERNAL CONNECTION
 | drop_tenant_stmt              // EXTEND WITH HELP: DROP TENANT
 | drop_unsupported   {}
-| DROP error         // SHOW HELP: DROP
+| DROP error                    // SHOW HELP: DROP
 
 drop_ddl_stmt:
   drop_database_stmt // EXTEND WITH HELP: DROP DATABASE
@@ -6455,7 +6460,7 @@ alter_tenant_rename_stmt:
     /* SKIP DOC */
     $$.val = &tree.AlterTenantRename{
       TenantSpec: $3.tenantSpec(),
-      NewName: $6.expr(),
+      NewName: &tree.TenantSpec{IsName: true, Expr: $6.expr()},
     }
   }
 
@@ -6918,7 +6923,7 @@ zone_value:
 // SHOW STATISTICS, SHOW SYNTAX, SHOW TABLES, SHOW TRACE, SHOW TRANSACTION,
 // SHOW TRANSACTIONS, SHOW TRANSFER, SHOW TYPES, SHOW USERS, SHOW LAST QUERY STATISTICS,
 // SHOW SCHEDULES, SHOW LOCALITY, SHOW ZONE CONFIGURATION, SHOW COMMIT TIMESTAMP,
-// SHOW FULL TABLE SCANS, SHOW CREATE EXTERNAL CONNECTIONS, SHOW TENANT
+// SHOW FULL TABLE SCANS, SHOW CREATE EXTERNAL CONNECTIONS
 show_stmt:
   show_backup_stmt           // EXTEND WITH HELP: SHOW BACKUP
 | show_columns_stmt          // EXTEND WITH HELP: SHOW COLUMNS

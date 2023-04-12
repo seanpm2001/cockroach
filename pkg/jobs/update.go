@@ -63,7 +63,7 @@ func (j *Job) maybeWithTxn(txn isql.Txn) Updater {
 
 func (u Updater) update(ctx context.Context, useReadLock bool, updateFn UpdateFn) (retErr error) {
 	if u.txn == nil {
-		return u.j.registry.internalDB.Txn(ctx, func(
+		return u.j.registry.db.Txn(ctx, func(
 			ctx context.Context, txn isql.Txn,
 		) error {
 			u.txn = txn
@@ -220,7 +220,7 @@ func (u Updater) update(ctx context.Context, useReadLock bool, updateFn UpdateFn
 		}
 	}
 
-	if !u.j.registry.settings.Version.IsActive(ctx, clusterversion.V23_2StopWritingPayloadAndProgressToSystemJobs) {
+	if !u.j.registry.settings.Version.IsActive(ctx, clusterversion.V23_1StopWritingPayloadAndProgressToSystemJobs) {
 		if payloadBytes != nil {
 			addSetter("payload", payloadBytes)
 		}
@@ -389,8 +389,8 @@ func getSelectStmtForJobUpdate(
 	const (
 		selectWithoutSession = `
 WITH
-	latestpayload AS (SELECT job_id, value FROM system.job_info AS payload WHERE info_key = 'legacy_payload'::BYTES),
-	latestprogress AS (SELECT job_id, value FROM system.job_info AS progress WHERE info_key = 'legacy_progress'::BYTES)
+	latestpayload AS (SELECT job_id, value FROM system.job_info AS payload WHERE info_key = 'legacy_payload' AND job_id = $1 ORDER BY written DESC LIMIT 1),
+	latestprogress AS (SELECT job_id, value FROM system.job_info AS progress WHERE info_key = 'legacy_progress' AND job_id = $1 ORDER BY written DESC LIMIT 1)
 	SELECT
 		status, payload.value AS payload, progress.value AS progress`
 		selectWithSession = selectWithoutSession + `, claim_session_id`

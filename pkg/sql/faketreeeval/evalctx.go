@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/rangedesc"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
@@ -134,12 +135,6 @@ func (so *DummyRegionOperator) ResetMultiRegionZoneConfigsForTable(
 func (so *DummyRegionOperator) ResetMultiRegionZoneConfigsForDatabase(
 	_ context.Context, id int64,
 ) error {
-	return errors.WithStack(errRegionOperator)
-}
-
-// OptimizeSystemDatabase is part of the eval.RegionOperator
-// interface.
-func (so *DummyRegionOperator) OptimizeSystemDatabase(_ context.Context) error {
 	return errors.WithStack(errRegionOperator)
 }
 
@@ -472,6 +467,13 @@ func (ep *DummyEvalPlanner) IsANSIDML() bool {
 // EnforceHomeRegion is part of the eval.Planner interface.
 func (ep *DummyEvalPlanner) EnforceHomeRegion() bool {
 	return false
+}
+
+// GetRangeDescIterator is part of the eval.Planner interface.
+func (ep *DummyEvalPlanner) GetRangeDescIterator(
+	context.Context, roachpb.Span,
+) (_ rangedesc.Iterator, _ error) {
+	return
 }
 
 // GetRangeDescByID is part of the eval.Planner interface.

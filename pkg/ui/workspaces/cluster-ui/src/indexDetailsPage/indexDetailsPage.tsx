@@ -28,7 +28,7 @@ import "antd/lib/col/style";
 import "antd/lib/row/style";
 import "antd/lib/tooltip/style";
 import { SummaryCard } from "../summaryCard";
-import moment, { Moment } from "moment";
+import moment, { Moment } from "moment-timezone";
 import { Heading } from "@cockroachlabs/ui-components";
 import { Anchor } from "../anchor";
 import {
@@ -74,7 +74,7 @@ import {
 import { commonStyles } from "../common";
 import { Loading } from "src";
 import LoadingError from "../sqlActivity/errorComponent";
-import { INTERNAL_APP_NAME_PREFIX } from "../recentExecutions/recentStatementUtils";
+import { INTERNAL_APP_NAME_PREFIX } from "src/util/constants";
 import { filteredStatementsData } from "../sqlActivity/util";
 
 const cx = classNames.bind(styles);

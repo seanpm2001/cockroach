@@ -95,7 +95,6 @@ go_test(
     args = ["-test.timeout=895s"],
     data = glob(["testdata/**"]),
     embed = [":streamingest"],
-    tags = ["ccl_test"],
     deps = [
         "//pkg/base",
         "//pkg/ccl",
@@ -137,7 +136,6 @@ go_test(
         "//pkg/testutils/datapathutils",
         "//pkg/testutils/distsqlutils",
         "//pkg/testutils/jobutils",
-        "//pkg/testutils/keysutils",
         "//pkg/testutils/serverutils",
         "//pkg/testutils/skip",
         "//pkg/testutils/sqlutils",

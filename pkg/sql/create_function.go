@@ -278,13 +278,16 @@ func (n *createFunctionNode) getMutableFuncDesc(
 		return nil, false, err
 	}
 
-	privileges := catprivilege.CreatePrivilegesFromDefaultPrivileges(
+	privileges, err := catprivilege.CreatePrivilegesFromDefaultPrivileges(
 		n.dbDesc.GetDefaultPrivilegeDescriptor(),
 		scDesc.GetDefaultPrivilegeDescriptor(),
 		n.dbDesc.GetID(),
 		params.SessionData().User(),
 		privilege.Functions,
 	)
+	if err != nil {
+		return nil, false, err
+	}
 
 	newUdfDesc := funcdesc.NewMutableFunctionDescriptor(
 		funcDescID,
@@ -454,7 +457,7 @@ func makeFunctionParam(
 	}
 
 	if param.DefaultVal != nil {
-		return descpb.FunctionDescriptor_Parameter{}, unimplemented.New("CREATE FUNCTION argument", "default value")
+		return descpb.FunctionDescriptor_Parameter{}, unimplemented.NewWithIssue(100962, "default value")
 	}
 
 	return pbParam, nil

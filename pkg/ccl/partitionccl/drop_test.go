@@ -217,8 +217,7 @@ SELECT job_id
 	              PARTITION c VALUES IN ('c')
 	  )`)
 		tdb.Exec(t, `CREATE INDEX idx ON t (e)`)
-		tdb.Exec(t, `ALTER PARTITION a OF TABLE t CONFIGURE ZONE USING range_min_bytes = 123456, 
-range_max_bytes = 654321000`)
+		tdb.Exec(t, `ALTER PARTITION a OF TABLE t CONFIGURE ZONE USING range_min_bytes = 123456, range_max_bytes = 654321`)
 		tdb.Exec(t, `ALTER INDEX t@idx CONFIGURE ZONE USING gc.ttlseconds = 1`)
 		tdb.Exec(t, `DROP INDEX t@idx`)
 
@@ -272,10 +271,8 @@ range_max_bytes = 654321000`)
 	              PARTITION ci VALUES IN ('c')
 	          )`,
 		)
-		tdb.Exec(t, `ALTER PARTITION ai OF INDEX t@idx CONFIGURE ZONE USING range_min_bytes = 123456,
-range_max_bytes = 654321000`)
-		tdb.Exec(t, `ALTER PARTITION a OF TABLE t CONFIGURE ZONE USING range_min_bytes = 123456, 
-range_max_bytes = 654321000`)
+		tdb.Exec(t, `ALTER PARTITION ai OF INDEX t@idx CONFIGURE ZONE USING range_min_bytes = 123456,range_max_bytes = 654321`)
+		tdb.Exec(t, `ALTER PARTITION a OF TABLE t CONFIGURE ZONE USING range_min_bytes = 123456, range_max_bytes = 654321`)
 		tdb.Exec(t, `ALTER INDEX t@idx CONFIGURE ZONE USING gc.ttlseconds = 1`)
 		tdb.Exec(t, `DROP INDEX t@idx`)
 		tdb.Exec(t, `DROP TABLE t`)

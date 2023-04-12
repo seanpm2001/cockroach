@@ -93,11 +93,6 @@ type tpccOptions struct {
 	// also be doing a rolling-restart into the new binary while the cluster
 	// is running, but that feels like jamming too much into the tpcc setup.
 	Start func(context.Context, test.Test, cluster.Cluster)
-	// EnableCircuitBreakers causes the kv.replica_circuit_breaker.slow_replication_threshold
-	// setting to be populated, which enables per-Replica circuit breakers.
-	//
-	// TODO(tbg): remove this once https://github.com/cockroachdb/cockroach/issues/74705 is completed.
-	EnableCircuitBreakers bool
 	// SkipPostRunCheck, if set, skips post TPC-C run checks.
 	SkipPostRunCheck              bool
 	DisableDefaultScheduledBackup bool
@@ -165,10 +160,6 @@ func setupTPCC(
 		opts.Start(ctx, t, c)
 		db := c.Conn(ctx, t.L(), 1)
 		defer db.Close()
-		if opts.EnableCircuitBreakers {
-			_, err := db.Exec(`SET CLUSTER SETTING kv.replica_circuit_breaker.slow_replication_threshold = '15s'`)
-			require.NoError(t, err)
-		}
 
 		if t.SkipInit() {
 			return
@@ -508,10 +499,9 @@ func registerTPCC(r registry.Registry) {
 			headroomWarehouses := int(float64(maxWarehouses) * 0.7)
 			t.L().Printf("computed headroom warehouses of %d\n", headroomWarehouses)
 			runTPCC(ctx, t, c, tpccOptions{
-				Warehouses:            headroomWarehouses,
-				Duration:              120 * time.Minute,
-				SetupType:             usingImport,
-				EnableCircuitBreakers: true,
+				Warehouses: headroomWarehouses,
+				Duration:   120 * time.Minute,
+				SetupType:  usingImport,
 			})
 		},
 	})
@@ -536,7 +526,6 @@ func registerTPCC(r registry.Registry) {
 	r.Add(registry.TestSpec{
 		// run the same mixed-headroom test, but going back two versions
 		Name:              "tpcc/mixed-headroom/multiple-upgrades/" + mixedHeadroomSpec.String(),
-		Timeout:           5 * time.Hour,
 		Owner:             registry.OwnerTestEng,
 		Tags:              []string{`default`},
 		Cluster:           mixedHeadroomSpec,
@@ -1084,7 +1073,6 @@ func registerTPCCBenchSpec(r registry.Registry, b tpccBenchSpec) {
 		Name:              name,
 		Owner:             owner,
 		Cluster:           nodes,
-		Timeout:           5 * time.Hour,
 		Tags:              b.Tags,
 		EncryptionSupport: encryptionSupport,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {

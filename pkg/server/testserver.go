@@ -25,7 +25,7 @@ import (
 	"github.com/cenkalti/backoff"
 	circuit "github.com/cockroachdb/circuitbreaker"
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/blobs"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
@@ -37,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
+	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security/certnames"
@@ -51,6 +52,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/ts"
@@ -568,7 +570,7 @@ func (ts *TestServer) maybeStartDefaultTestTenant(ctx context.Context) error {
 	// Since we're creating a tenant, it doesn't make sense to pass through the
 	// Server testing knobs, since the bulk of them only apply to the system
 	// tenant. Any remaining knobs which are required by the tenant should be
-	// setup in StartTenant below (like the BlobClientFactory).
+	// setup in StartTenant below.
 	params.TestingKnobs.Server = &TestingKnobs{}
 
 	tenant, err := ts.StartTenant(ctx, params)
@@ -650,7 +652,8 @@ func (ts *TestServer) Start(ctx context.Context) error {
 // serverutils.StartTenant method.
 type TestTenant struct {
 	*SQLServer
-	Cfg *BaseConfig
+	Cfg    *BaseConfig
+	SQLCfg *SQLConfig
 	*httpTestServer
 	drain *drainServer
 
@@ -913,6 +916,7 @@ func (ts *TestServer) StartSharedProcessTenant(
 	testTenant := &TestTenant{
 		SQLServer:      sqlServer,
 		Cfg:            sqlServer.cfg,
+		SQLCfg:         sqlServerWrapper.sqlCfg,
 		pgPreServer:    sqlServerWrapper.pgPreServer,
 		httpTestServer: hts,
 		drain:          sqlServerWrapper.drainServer,
@@ -936,8 +940,10 @@ func (ts *TestServer) StartTenant(
 	ctx context.Context, params base.TestTenantArgs,
 ) (serverutils.TestTenantInterface, error) {
 	// Determine if we need to create the tenant before starting it.
+
+	ie := ts.InternalExecutor().(*sql.InternalExecutor)
 	if !params.DisableCreateTenant {
-		rowCount, err := ts.InternalExecutor().(*sql.InternalExecutor).Exec(
+		rowCount, err := ie.Exec(
 			ctx, "testserver-check-tenant-active", nil,
 			"SELECT 1 FROM system.tenants WHERE id=$1 AND active=true",
 			params.TenantID.ToUint64(),
@@ -947,14 +953,14 @@ func (ts *TestServer) StartTenant(
 		}
 		if rowCount == 0 {
 			// Tenant doesn't exist. Create it.
-			if _, err := ts.InternalExecutor().(*sql.InternalExecutor).Exec(
+			if _, err := ie.Exec(
 				ctx, "testserver-create-tenant", nil /* txn */, "SELECT crdb_internal.create_tenant($1, $2)",
 				params.TenantID.ToUint64(), params.TenantName,
 			); err != nil {
 				return nil, err
 			}
 		} else if params.TenantName != "" {
-			_, err := ts.InternalExecutor().(*sql.InternalExecutor).Exec(ctx, "rename-test-tenant", nil,
+			_, err := ie.Exec(ctx, "rename-test-tenant", nil,
 				`ALTER TENANT [$1] RENAME TO $2`,
 				params.TenantID.ToUint64(), params.TenantName)
 			if err != nil {
@@ -966,7 +972,7 @@ func (ts *TestServer) StartTenant(
 		if params.TenantID.IsSet() {
 			requestedID = params.TenantID.ToUint64()
 		}
-		rows, err := ts.InternalExecutor().(*sql.InternalExecutor).QueryBuffered(
+		rows, err := ie.QueryBuffered(
 			ctx, "testserver-check-tenant-active", nil,
 			"SELECT id, name FROM system.tenants WHERE ($1 <> 0 AND id=$1) OR ($2 <> '' AND name = $2) AND active=true",
 			requestedID, string(params.TenantName),
@@ -1009,6 +1015,18 @@ func (ts *TestServer) StartTenant(
 	if st == nil {
 		st = cluster.MakeTestingClusterSettings()
 	}
+	// Verify that the settings object that was passed in has
+	// initialized the version setting. This is pretty much necessary
+	// for secondary tenants. See the comments at the beginning of
+	// `runStartSQL()` in cli/mt_start_sql.go and
+	// `makeSharedProcessTenantServerConfig()` in
+	// server_controller_new_server.go.
+	//
+	// The version is initialized in MakeTestingClusterSettings(). This
+	// assertion is there to prevent inadvertent changes to
+	// MakeTestingClusterSettings() and as a guardrail for tests that
+	// pass a custom params.Settings.
+	clusterversion.AssertInitialized(ctx, &st.SV)
 
 	// Needed for backward-compat on crdb_internal.ranges{_no_leases}.
 	// Remove in v23.2.
@@ -1066,25 +1084,36 @@ func (ts *TestServer) StartTenant(
 	baseCfg.DisableTLSForHTTP = params.DisableTLSForHTTP
 	baseCfg.EnableDemoLoginEndpoint = params.EnableDemoLoginEndpoint
 
+	if ts.ClusterSettings().Version.IsActive(ctx, clusterversion.V23_1TenantCapabilities) {
+		_, err := ie.Exec(ctx, "testserver-alter-tenant-cap", nil,
+			"ALTER TENANT [$1] GRANT CAPABILITY can_use_nodelocal_storage", params.TenantID.ToUint64())
+		if err != nil {
+			if params.SkipTenantCheck {
+				log.Infof(ctx, "ignoring error granting capability because SkipTenantCheck is true: %v", err)
+			} else {
+				return nil, err
+			}
+		} else {
+			if err := testutils.SucceedsSoonError(func() error {
+				capabilities, found := ts.TenantCapabilitiesReader().GetCapabilities(params.TenantID)
+				if !found {
+					return errors.Newf("capabilities not yet ready")
+				}
+				if !tenantcapabilities.MustGetBoolByID(
+					capabilities, tenantcapabilities.CanUseNodelocalStorage,
+				) {
+					return errors.Newf("capabilities not yet ready")
+				}
+				return nil
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	// For now, we don't support split RPC/SQL ports for secondary tenants
 	// in test servers.
 	baseCfg.SplitListenSQL = true
-
-	localNodeIDContainer := &base.NodeIDContainer{}
-	localNodeIDContainer.Set(ctx, ts.NodeID())
-	blobClientFactory := blobs.NewBlobClientFactory(
-		localNodeIDContainer,
-		ts.Server.nodeDialer,
-		params.ExternalIODir,
-	)
-	tk := &baseCfg.TestingKnobs
-	if serverKnobs, ok := tk.Server.(*TestingKnobs); ok {
-		serverKnobs.BlobClientFactory = blobClientFactory
-	} else {
-		tk.Server = &TestingKnobs{
-			BlobClientFactory: blobClientFactory,
-		}
-	}
 
 	if params.SSLCertsDir != "" {
 		baseCfg.SSLCertsDir = params.SSLCertsDir
@@ -1149,6 +1178,7 @@ func (ts *TestServer) StartTenant(
 	return &TestTenant{
 		SQLServer:      sw.sqlServer,
 		Cfg:            &baseCfg,
+		SQLCfg:         &sqlCfg,
 		pgPreServer:    sw.pgPreServer,
 		httpTestServer: hts,
 		drain:          sw.drainServer,

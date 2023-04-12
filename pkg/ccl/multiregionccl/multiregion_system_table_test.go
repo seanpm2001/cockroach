@@ -72,8 +72,6 @@ func TestMrSystemDatabase(t *testing.T) {
 	tDB.Exec(t, `ALTER DATABASE system ADD REGION "us-east2"`)
 	tDB.Exec(t, `ALTER DATABASE system ADD REGION "us-east3"`)
 
-	tDB.Exec(t, `SELECT crdb_internal.unsafe_optimize_system_database()`)
-
 	// Run schema validations to ensure the manual descriptor modifications are
 	// okay.
 	tDB.CheckQueryResults(t, `SELECT * FROM crdb_internal.invalid_objects`, [][]string{})
@@ -234,11 +232,10 @@ func TestMrSystemDatabase(t *testing.T) {
 	})
 
 	t.Run("QueryByEnum", func(t *testing.T) {
-		// This is a regression test for a bug triggered by
-		// unsafe_optimize_system_database. If usnafe_optimize_system_database
-		// does not clear table statistics, this query will fail in the
-		// optimizer, because the stats will have the wrong type for the
-		// crdb_column.
+		// This is a regression test for a bug triggered by setting up the system
+		// database. If the operation to configure the does not clear table
+		// statistics, this query will fail in the optimizer, because the stats
+		// will have the wrong type for the crdb_column.
 		row := tDB.QueryRow(t, `
 			SELECT crdb_region, session_id, expiration 
 			FROM system.sqlliveness 
@@ -250,6 +247,87 @@ func TestMrSystemDatabase(t *testing.T) {
 		row.Scan(&crdbRegion, &sessionID, &rawExpiration)
 		require.Equal(t, "us-east1", crdbRegion)
 	})
+}
+
+// TestMultiRegionTenantRegions tests the behavior of region-related
+// commands in the context of a multi-region tenant (a tenant with a
+// multi-region system database).
+func TestMultiRegionTenantRegions(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	// Enable settings required for configuring a tenant's system database as multi-region.
+	cs := cluster.MakeTestingClusterSettings()
+	sql.SecondaryTenantsMultiRegionAbstractionsEnabled.Override(context.Background(), &cs.SV, true)
+	sql.SecondaryTenantZoneConfigsEnabled.Override(context.Background(), &cs.SV, true)
+
+	tc, _, cleanup := multiregionccltestutils.TestingCreateMultiRegionCluster(
+		t, 3 /*numServers*/, base.TestingKnobs{}, multiregionccltestutils.WithSettings(cs),
+	)
+	defer cleanup()
+
+	ctx := context.Background()
+	ten, tSQL := serverutils.StartTenant(t, tc.Server(0), base.TestTenantArgs{
+		Settings: cs,
+		TenantID: serverutils.TestTenantID(),
+		Locality: roachpb.Locality{
+			Tiers: []roachpb.Tier{
+				{Key: "region", Value: "us-east1"},
+			},
+		},
+	})
+	defer ten.Stopper().Stop(ctx)
+	defer tSQL.Close()
+	tenSQLDB := sqlutils.MakeSQLRunner(tSQL)
+
+	// Update system database with regions.
+	checkRegions := func(t *testing.T, regions ...string) {
+		var res [][]string
+		for _, r := range regions {
+			res = append(res, []string{r})
+		}
+		tenSQLDB.CheckQueryResults(t, "SELECT region FROM [SHOW REGIONS] ORDER BY region ASC", res)
+	}
+
+	// Note that before we've made this a multi-region tenant, because we've
+	// enabled the cluster setting, we can see all the host cluster regions,
+	// and we can create databases using them.
+	checkRegions(t, "us-east1", "us-east2", "us-east3")
+	tenSQLDB.Exec(t, `CREATE DATABASE db PRIMARY REGION "us-east2"`)
+	tenSQLDB.Exec(t, `ALTER DATABASE db ADD REGION "us-east1"`)
+	tenSQLDB.Exec(t, `DROP DATABASE db`)
+
+	// Convert the tenant to a multi-region tenant by adding a primary region
+	// to the system database.  Ensure that the regions show up as they are added.
+	tenSQLDB.Exec(t, `ALTER DATABASE system SET PRIMARY REGION "us-east1"`)
+	checkRegions(t, "us-east1")
+
+	// Check that regions which are not part of the database cannot be used
+	// until they are added to the system database.
+	tenSQLDB.ExpectErr(t, `region "us-east2" does not exist`,
+		`CREATE DATABASE db PRIMARY REGION "us-east2"`)
+	tenSQLDB.Exec(t, `CREATE DATABASE db PRIMARY REGION "us-east1"`)
+
+	tenSQLDB.Exec(t, `ALTER DATABASE system ADD REGION "us-east2"`)
+	checkRegions(t, "us-east1", "us-east2")
+	tenSQLDB.ExpectErr(t, `region "us-east3" does not exist`,
+		`CREATE DATABASE db2 PRIMARY REGION "us-east3"`)
+	tenSQLDB.ExpectErr(t, `region "us-east3" does not exist`,
+		`ALTER DATABASE db ADD REGION "us-east3"`)
+	tenSQLDB.Exec(t, `ALTER DATABASE db ADD REGION "us-east2"`)
+
+	// Check that a region cannot be dropped from the system database while
+	// it is in use in any database in that tenant.
+	tenSQLDB.ExpectErr(t, `(?s)cannot drop region "us-east2" from the system `+
+		`database while that region is still in use\s+HINT: region is in use by `+
+		`databases: db`,
+		`ALTER DATABASE system DROP REGION "us-east2"`)
+	tenSQLDB.Exec(t, `ALTER DATABASE db DROP REGION "us-east2"`)
+	tenSQLDB.Exec(t, `ALTER DATABASE system DROP REGION "us-east2"`)
+
+	tenSQLDB.Exec(t, `ALTER DATABASE system ADD REGION "us-east3"`)
+	checkRegions(t, "us-east1", "us-east3")
+	tenSQLDB.Exec(t, `ALTER DATABASE db ADD REGION "us-east3"`)
 }
 
 func TestTenantStartupWithMultiRegionEnum(t *testing.T) {
@@ -304,6 +382,7 @@ func TestTenantStartupWithMultiRegionEnum(t *testing.T) {
 	region, _, err := slstorage.UnsafeDecodeSessionID(sqlliveness.SessionID(sessionID))
 	require.NoError(t, err)
 	require.Equal(t, enum.One, region)
+	ten1SessionID := sessionID
 
 	// Ensure that the sqlliveness entry created by the second SQL server has
 	// the right region and session UUID.
@@ -315,14 +394,21 @@ func TestTenantStartupWithMultiRegionEnum(t *testing.T) {
 
 	rows := tenSQLDB2.Query(t, `SELECT crdb_region, session_id FROM system.sqlliveness`)
 	defer rows.Close()
-	livenessMap := map[string][]byte{}
+	livenessMap := map[string]string{}
 	for rows.Next() {
 		var region, ID string
 		require.NoError(t, rows.Scan(&region, &ID))
-		livenessMap[ID] = []byte(region)
+		livenessMap[ID] = region
 	}
 	require.NoError(t, rows.Err())
-	r, ok := livenessMap[sessionID]
-	require.True(t, ok)
-	require.Equal(t, r, region)
+	{
+		r, ok := livenessMap[sessionID]
+		require.True(t, ok)
+		require.Equal(t, r, "us-east3")
+	}
+	{
+		r, ok := livenessMap[ten1SessionID]
+		require.True(t, ok)
+		require.Equal(t, r, "us-east1")
+	}
 }

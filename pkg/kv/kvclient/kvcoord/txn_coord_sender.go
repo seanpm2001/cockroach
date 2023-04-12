@@ -1170,15 +1170,14 @@ func (tc *TxnCoordSender) Active() bool {
 
 // GetLeafTxnInputState is part of the client.TxnSender interface.
 func (tc *TxnCoordSender) GetLeafTxnInputState(
-	ctx context.Context,
+	ctx context.Context, opt kv.TxnStatusOpt,
 ) (*roachpb.LeafTxnInputState, error) {
 	tis := new(roachpb.LeafTxnInputState)
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 
-	pErr := tc.maybeRejectClientLocked(ctx, nil /* ba */)
-	if pErr != nil {
-		return nil, pErr.GoError()
+	if err := tc.checkTxnStatusLocked(ctx, opt); err != nil {
+		return nil, err
 	}
 
 	// Copy mutable state so access is safe for the caller.
@@ -1198,20 +1197,15 @@ func (tc *TxnCoordSender) GetLeafTxnInputState(
 
 // GetLeafTxnFinalState is part of the client.TxnSender interface.
 func (tc *TxnCoordSender) GetLeafTxnFinalState(
-	ctx context.Context,
+	ctx context.Context, opt kv.TxnStatusOpt,
 ) (*roachpb.LeafTxnFinalState, error) {
 	tfs := new(roachpb.LeafTxnFinalState)
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 
-	// TODO(nvanbenschoten): should we be calling maybeRejectClientLocked here?
-	// The caller in execinfra.GetLeafTxnFinalState is not set up to propagate
-	// errors, so for now, we don't.
-	//
-	//   pErr := tc.maybeRejectClientLocked(ctx, nil /* ba */)
-	//   if pErr != nil {
-	//   	return nil, pErr.GoError()
-	//   }
+	if err := tc.checkTxnStatusLocked(ctx, opt); err != nil {
+		return nil, err
+	}
 
 	// For compatibility with pre-20.1 nodes: populate the command
 	// count.
@@ -1228,6 +1222,22 @@ func (tc *TxnCoordSender) GetLeafTxnFinalState(
 	}
 
 	return tfs, nil
+}
+
+func (tc *TxnCoordSender) checkTxnStatusLocked(ctx context.Context, opt kv.TxnStatusOpt) error {
+	switch opt {
+	case kv.AnyTxnStatus:
+		// Nothing to check.
+	case kv.OnlyPending:
+		// Check the coordinator's proto status.
+		rejectErr := tc.maybeRejectClientLocked(ctx, nil /* ba */)
+		if rejectErr != nil {
+			return rejectErr.GoError()
+		}
+	default:
+		panic("unreachable")
+	}
+	return nil
 }
 
 // UpdateRootWithLeafFinalState is part of the client.TxnSender interface.
@@ -1304,13 +1314,6 @@ func (tc *TxnCoordSender) Step(ctx context.Context) error {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	return tc.interceptorAlloc.txnSeqNumAllocator.stepLocked(ctx)
-}
-
-// GetReadSeqNum is part of the TxnSender interface.
-func (tc *TxnCoordSender) GetReadSeqNum() enginepb.TxnSeq {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	return tc.interceptorAlloc.txnSeqNumAllocator.readSeq
 }
 
 // SetReadSeqNum is part of the TxnSender interface.

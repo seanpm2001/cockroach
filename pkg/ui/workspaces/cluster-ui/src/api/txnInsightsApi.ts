@@ -31,14 +31,14 @@ import {
   TxnInsightDetails,
   TxnInsightEvent,
 } from "src/insights";
-import moment from "moment";
+import moment from "moment-timezone";
 import { FixFingerprintHexValue } from "../util";
 import {
   formatStmtInsights,
   stmtInsightsByTxnExecutionQuery,
   StmtInsightsResponseRow,
 } from "./stmtInsightsApi";
-import { INTERNAL_APP_NAME_PREFIX } from "src/recentExecutions/recentStatementUtils";
+import { INTERNAL_APP_NAME_PREFIX } from "src/util/constants";
 import { getContentionDetailsApi } from "./contentionApi";
 
 export const TXN_QUERY_PREVIEW_MAX = 800;
@@ -384,7 +384,7 @@ function formatTxnInsightsRow(row: TxnInsightsResponseRow): TxnInsightEvent {
     transactionExecutionID: row.txn_id,
     transactionFingerprintID: row.txn_fingerprint_id,
     implicitTxn: row.implicit_txn,
-    query: row.query.split(" ; ").join("\n"),
+    query: row.query?.split(" ; ").join("\n") || "",
     startTime,
     endTime,
     elapsedTimeMillis: endTime.diff(startTime, "milliseconds"),

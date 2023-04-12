@@ -39,7 +39,6 @@ func TestSchemaChangesInParallel(t *testing.T) {
 			},
 			JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
 		},
-		SQLMemoryPoolSize: 1 << 30, /* 1GiB */
 	})
 	defer s.Stopper().Stop(ctx)
 

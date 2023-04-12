@@ -13,6 +13,7 @@ package keyside
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/errors"
 )
 
@@ -173,7 +174,7 @@ func Encode(b []byte, val tree.Datum, dir encoding.Direction) ([]byte, error) {
 		// DEncodedKey carries an already encoded key.
 		return append(b, []byte(*t)...), nil
 	case *tree.DJSON:
-		return encodeJSONKey(b, t, dir)
+		return nil, unimplemented.NewWithIssue(35706, "unable to encode JSON as a table key")
 	}
 	return nil, errors.Errorf("unable to encode table key: %T", val)
 }

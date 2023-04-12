@@ -87,6 +87,7 @@ crdb_internal  session_trace                     table  admin  NULL  NULL
 crdb_internal  session_variables                 table  admin  NULL  NULL
 crdb_internal  statement_statistics              view   admin  NULL  NULL
 crdb_internal  statement_statistics_persisted    view   admin  NULL  NULL
+crdb_internal  statement_statistics_persisted_v22_2    view   admin  NULL  NULL
 crdb_internal  super_regions                     table  admin  NULL  NULL
 crdb_internal  system_jobs                       table  admin  NULL  NULL
 crdb_internal  table_columns                     table  admin  NULL  NULL
@@ -98,6 +99,7 @@ crdb_internal  tenant_usage_details              view   admin  NULL  NULL
 crdb_internal  transaction_contention_events     table  admin  NULL  NULL
 crdb_internal  transaction_statistics            view   admin  NULL  NULL
 crdb_internal  transaction_statistics_persisted  view   admin  NULL  NULL
+crdb_internal  transaction_statistics_persisted_v22_2  view   admin  NULL  NULL
 crdb_internal  zones                             table  admin  NULL  NULL
 
 statement ok
@@ -501,8 +503,12 @@ SELECT zone_id, target FROM crdb_internal.zones ORDER BY 1
 22   RANGE liveness
 25   TABLE system.public.replication_constraint_stats
 27   TABLE system.public.replication_stats
+42   TABLE system.public.statement_statistics
+43   TABLE system.public.transaction_statistics
 45   TABLE system.public.tenant_usage
 57   TABLE system.public.span_stats_tenant_boundaries
+60   TABLE system.public.statement_activity
+61   TABLE system.public.transaction_activity
 106  DATABASE testdb
 108  TABLE testdb.public.foo
 111  TABLE test.schema.bar
@@ -560,7 +566,7 @@ select crdb_internal.get_vmodule()
 query T
 select regexp_replace(crdb_internal.node_executable_version()::string, '(-\d+)?$', '');
 ----
-1000023.1
+22.2
 
 query ITTT colnames
 select node_id, component, field, regexp_replace(regexp_replace(value, '^\d+$', '<port>'), e':\\d+', ':<port>') as value from crdb_internal.node_runtime_info
@@ -714,7 +720,7 @@ SELECT * FROM crdb_internal.check_consistency(true, b'\x02', b'\x04')
 query T
 select regexp_replace(crdb_internal.node_executable_version()::string, '(-\d+)?$', '');
 ----
-1000023.1
+22.2
 
 user root
 

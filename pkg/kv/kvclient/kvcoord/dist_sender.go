@@ -40,6 +40,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/startup"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -165,12 +166,6 @@ This counts the number of ranges with an active rangefeed that are performing ca
 		Measurement: "Ranges",
 		Unit:        metric.Unit_COUNT,
 	}
-	metaDistSenderRangefeedRestartRanges = metric.Metadata{
-		Name:        "distsender.rangefeed.restart_ranges",
-		Help:        `Number of ranges that were restarted due to transient errors`,
-		Measurement: "Ranges",
-		Unit:        metric.Unit_COUNT,
-	}
 	metaDistSenderRangefeedRestartStuck = metric.Metadata{
 		Name: "distsender.rangefeed.restart_stuck",
 		Help: `Number of times a rangefeed was restarted due to not receiving ` +
@@ -245,7 +240,6 @@ type DistSenderMetrics struct {
 	RangefeedRanges         *metric.Gauge
 	RangefeedCatchupRanges  *metric.Gauge
 	RangefeedErrorCatchup   *metric.Counter
-	RangefeedRestartRanges  *metric.Counter
 	RangefeedRestartStuck   *metric.Counter
 	MethodCounts            [kvpb.NumMethods]*metric.Counter
 	ErrCounts               [kvpb.NumErrors]*metric.Counter
@@ -267,7 +261,6 @@ func makeDistSenderMetrics() DistSenderMetrics {
 		RangefeedRanges:         metric.NewGauge(metaDistSenderRangefeedTotalRanges),
 		RangefeedCatchupRanges:  metric.NewGauge(metaDistSenderRangefeedCatchupRanges),
 		RangefeedErrorCatchup:   metric.NewCounter(metaDistSenderRangefeedErrorCatchupRanges),
-		RangefeedRestartRanges:  metric.NewCounter(metaDistSenderRangefeedRestartRanges),
 		RangefeedRestartStuck:   metric.NewCounter(metaDistSenderRangefeedRestartStuck),
 	}
 	for i := range m.MethodCounts {
@@ -802,6 +795,8 @@ func unsetCanForwardReadTimestampFlag(ba *kvpb.BatchRequest) {
 func (ds *DistSender) Send(
 	ctx context.Context, ba *kvpb.BatchRequest,
 ) (*kvpb.BatchResponse, *kvpb.Error) {
+	startup.AssertStartupRetry(ctx)
+
 	ds.incrementBatchCounters(ba)
 
 	if pErr := ds.initAndVerifyBatch(ctx, ba); pErr != nil {

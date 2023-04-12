@@ -364,9 +364,6 @@ var _ Command = CopyIn{}
 type CopyOut struct {
 	ParsedStmt parser.Statement
 	Stmt       *tree.CopyTo
-	// Conn is the network connection. Execution of the CopyFrom statement takes
-	// control of the connection.
-	Conn pgwirebase.Conn
 	// TimeReceived is the time at which the message was received
 	// from the client. Used to compute the service latency.
 	TimeReceived time.Time
@@ -680,9 +677,9 @@ type ClientComm interface {
 	// CreateEmptyQueryResult creates a result for an empty-string query.
 	CreateEmptyQueryResult(pos CmdPos) EmptyQueryResult
 	// CreateCopyInResult creates a result for a Copy-in command.
-	CreateCopyInResult(pos CmdPos) CopyInResult
+	CreateCopyInResult(cmd CopyIn, pos CmdPos) CopyInResult
 	// CreateCopyOutResult creates a result for a Copy-out command.
-	CreateCopyOutResult(pos CmdPos) CopyOutResult
+	CreateCopyOutResult(cmd CopyOut, pos CmdPos) CopyOutResult
 	// CreateDrainResult creates a result for a Drain command.
 	CreateDrainResult(pos CmdPos) DrainResult
 
@@ -811,6 +808,16 @@ type RestrictedCommandResult interface {
 	// GetBulkJobId returns the id of the job for the query, if the query is
 	// IMPORT, BACKUP or RESTORE.
 	GetBulkJobId() uint64
+
+	// ErrAllowReleased returns the error without asserting the result is not
+	// released yet. It should be used only in clean-up stages of a pausable
+	// portal.
+	ErrAllowReleased() error
+
+	// RevokePortalPausability is to make a portal un-pausable. It is called when
+	// we find the underlying query is not supported for a pausable portal.
+	// This method is implemented only by pgwire.limitedCommandResult.
+	RevokePortalPausability() error
 }
 
 // DescribeResult represents the result of a Describe command (for either
@@ -877,15 +884,29 @@ type EmptyQueryResult interface {
 }
 
 // CopyInResult represents the result of a CopyIn command. Closing this result
-// produces no output for the client.
+// sends a CommandComplete message to the client.
 type CopyInResult interface {
 	ResultBase
+
+	// SetRowsAffected sets the number of rows affected by the COPY.
+	SetRowsAffected(ctx context.Context, n int)
 }
 
 // CopyOutResult represents the result of a CopyOut command. Closing this result
-// produces no output for the client.
+// sends a CommandComplete message to the client.
 type CopyOutResult interface {
 	ResultBase
+
+	// SendCopyOut sends the copy out response to the client.
+	SendCopyOut(
+		ctx context.Context, cols colinfo.ResultColumns, format pgwirebase.FormatCode,
+	) error
+
+	// SendCopyData adds a COPY data row to the result.
+	SendCopyData(ctx context.Context, copyData []byte, isHeader bool) error
+
+	// SendCopyDone sends the copy done response to the client.
+	SendCopyDone(ctx context.Context) error
 }
 
 // ClientLock is an interface returned by ClientComm.lockCommunication(). It
@@ -964,6 +985,16 @@ type streamingCommandResult struct {
 
 var _ RestrictedCommandResult = &streamingCommandResult{}
 var _ CommandResultClose = &streamingCommandResult{}
+
+// ErrAllowReleased is part of the sql.RestrictedCommandResult interface.
+func (r *streamingCommandResult) ErrAllowReleased() error {
+	return r.err
+}
+
+// RevokePortalPausability is part of the sql.RestrictedCommandResult interface.
+func (r *streamingCommandResult) RevokePortalPausability() error {
+	return errors.AssertionFailedf("forPausablePortal is for limitedCommandResult only")
+}
 
 // SetColumns is part of the RestrictedCommandResult interface.
 func (r *streamingCommandResult) SetColumns(ctx context.Context, cols colinfo.ResultColumns) {
@@ -1077,6 +1108,30 @@ func (r *streamingCommandResult) SetPrepStmtOutput(context.Context, colinfo.Resu
 func (r *streamingCommandResult) SetPortalOutput(
 	context.Context, colinfo.ResultColumns, []pgwirebase.FormatCode,
 ) {
+}
+
+// SetRowsAffected is part of the sql.CopyInResult interface.
+func (r *streamingCommandResult) SetRowsAffected(ctx context.Context, rows int) {
+	r.rowsAffected = rows
+}
+
+// SendCopyOut is part of the sql.CopyOutResult interface.
+func (r *streamingCommandResult) SendCopyOut(
+	ctx context.Context, cols colinfo.ResultColumns, format pgwirebase.FormatCode,
+) error {
+	return errors.AssertionFailedf("streamingCommandResult does not implement SendCopyOut")
+}
+
+// SendCopyData is part of the sql.CopyOutResult interface.
+func (r *streamingCommandResult) SendCopyData(
+	ctx context.Context, copyData []byte, isHeader bool,
+) error {
+	return errors.AssertionFailedf("streamingCommandResult does not implement SendCopyData")
+}
+
+// SendCopyDone is part of the pgwirebase.Conn interface.
+func (r *streamingCommandResult) SendCopyDone(ctx context.Context) error {
+	return errors.AssertionFailedf("streamingCommandResult does not implement SendCopyDone")
 }
 
 // BulkJobInfoKey are for keys stored in pgwire.commandResult.bulkJobInfo.

@@ -16,7 +16,6 @@ import (
 	"io"
 	"math"
 	"math/rand"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -881,6 +880,7 @@ func newSessionData(args SessionArgs) *sessiondata.SessionData {
 		},
 		LocalUnmigratableSessionData: sessiondata.LocalUnmigratableSessionData{
 			RemoteAddr: args.RemoteAddr,
+			IsSSL:      args.IsSSL,
 		},
 		LocalOnlySessionData: sessiondatapb.LocalOnlySessionData{
 			ResultsBufferSize:   args.ConnResultsBufferSize,
@@ -1063,7 +1063,8 @@ func (s *Server) newConnExecutor(
 	ex.extraTxnState.jobs = newTxnJobsCollection()
 	ex.extraTxnState.txnRewindPos = -1
 	ex.extraTxnState.schemaChangerState = &SchemaChangerState{
-		mode: ex.sessionData().NewSchemaChangerMode,
+		mode:   ex.sessionData().NewSchemaChangerMode,
+		memAcc: ex.sessionMon.MakeBoundAccount(),
 	}
 	ex.queryCancelKey = pgwirecancel.MakeBackendKeyData(ex.rng, ex.server.cfg.NodeInfo.NodeID.SQLInstanceID())
 	ex.mu.ActiveQueries = make(map[clusterunique.ID]*queryMeta)
@@ -1137,6 +1138,14 @@ func (ex *connExecutor) close(ctx context.Context, closeType closeType) {
 	if _, noTxn := ex.machine.CurState().(stateNoTxn); !noTxn {
 		txnEvType = txnRollback
 	}
+
+	// Close all portals, otherwise there will be leftover bytes.
+	ex.extraTxnState.prepStmtsNamespace.closeAllPortals(
+		ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc,
+	)
+	ex.extraTxnState.prepStmtsNamespaceAtTxnRewindPos.closeAllPortals(
+		ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc,
+	)
 
 	if closeType == normalClose {
 		// We'll cleanup the SQL txn by creating a non-retriable (commit:true) event.
@@ -1431,6 +1440,8 @@ type connExecutor struct {
 		// statements.
 		transactionStatementsHash util.FNV64
 
+		// schemaChangerState captures the state of the ongoing declarative schema
+		// in the transaction.
 		schemaChangerState *SchemaChangerState
 
 		// shouldCollectTxnExecutionStats specifies whether the statements in
@@ -1760,6 +1771,26 @@ func (ns *prepStmtNamespace) touchLRUEntry(name string) {
 	ns.addLRUEntry(name, 0)
 }
 
+func (ns *prepStmtNamespace) closeAllPortals(
+	ctx context.Context, prepStmtsNamespaceMemAcc *mon.BoundAccount,
+) {
+	for name, p := range ns.portals {
+		p.close(ctx, prepStmtsNamespaceMemAcc, name)
+		delete(ns.portals, name)
+	}
+}
+
+func (ns *prepStmtNamespace) closeAllPausablePortals(
+	ctx context.Context, prepStmtsNamespaceMemAcc *mon.BoundAccount,
+) {
+	for name, p := range ns.portals {
+		if p.pauseInfo != nil {
+			p.close(ctx, prepStmtsNamespaceMemAcc, name)
+			delete(ns.portals, name)
+		}
+	}
+}
+
 // MigratablePreparedStatements returns a mapping of all prepared statements.
 func (ns *prepStmtNamespace) MigratablePreparedStatements() []sessiondatapb.MigratableSession_PreparedStatement {
 	ret := make([]sessiondatapb.MigratableSession_PreparedStatement, 0, len(ns.prepStmts))
@@ -1836,10 +1867,7 @@ func (ns *prepStmtNamespace) resetTo(
 	for name := range ns.prepStmtsLRU {
 		delete(ns.prepStmtsLRU, name)
 	}
-	for name, p := range ns.portals {
-		p.close(ctx, prepStmtsNamespaceMemAcc, name)
-		delete(ns.portals, name)
-	}
+	ns.closeAllPortals(ctx, prepStmtsNamespaceMemAcc)
 
 	for name, ps := range to.prepStmts {
 		ps.incRef(ctx)
@@ -1874,16 +1902,17 @@ func (ex *connExecutor) resetExtraTxnState(ctx context.Context, ev txnEvent) {
 	} else {
 		ex.extraTxnState.descCollection.ReleaseAll(ctx)
 		ex.extraTxnState.jobs.reset()
+		ex.extraTxnState.schemaChangerState.memAcc.Clear(ctx)
 		ex.extraTxnState.schemaChangerState = &SchemaChangerState{
-			mode: ex.sessionData().NewSchemaChangerMode,
+			mode:   ex.sessionData().NewSchemaChangerMode,
+			memAcc: ex.sessionMon.MakeBoundAccount(),
 		}
 	}
 
 	// Close all portals.
-	for name, p := range ex.extraTxnState.prepStmtsNamespace.portals {
-		p.close(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc, name)
-		delete(ex.extraTxnState.prepStmtsNamespace.portals, name)
-	}
+	ex.extraTxnState.prepStmtsNamespace.closeAllPortals(
+		ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc,
+	)
 
 	// Close all cursors.
 	if err := ex.extraTxnState.sqlCursors.closeAll(false /* errorOnWithHold */); err != nil {
@@ -1894,10 +1923,9 @@ func (ex *connExecutor) resetExtraTxnState(ctx context.Context, ev txnEvent) {
 
 	switch ev.eventType {
 	case txnCommit, txnRollback:
-		for name, p := range ex.extraTxnState.prepStmtsNamespaceAtTxnRewindPos.portals {
-			p.close(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc, name)
-			delete(ex.extraTxnState.prepStmtsNamespaceAtTxnRewindPos.portals, name)
-		}
+		ex.extraTxnState.prepStmtsNamespaceAtTxnRewindPos.closeAllPortals(
+			ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc,
+		)
 		ex.extraTxnState.savepoints.clear()
 		ex.onTxnFinish(ctx, ev)
 	case txnRestart:
@@ -2044,7 +2072,6 @@ func (ex *connExecutor) run(
 			return err
 		}
 	}
-
 }
 
 // errDrainingComplete is returned by execCmd when the connExecutor previously got
@@ -2116,7 +2143,7 @@ func (ex *connExecutor) execCmd() (retErr error) {
 				(tcmd.LastInBatchBeforeShowCommitTimestamp ||
 					tcmd.LastInBatch || !implicitTxnForBatch)
 			ev, payload, err = ex.execStmt(
-				ctx, tcmd.Statement, nil /* prepared */, nil /* pinfo */, stmtRes, canAutoCommit,
+				ctx, tcmd.Statement, nil /* portal */, nil /* pinfo */, stmtRes, canAutoCommit,
 			)
 
 			return err
@@ -2173,6 +2200,12 @@ func (ex *connExecutor) execCmd() (retErr error) {
 				Values: portal.Qargs,
 			}
 
+			// If this is the first-time execution of a portal without a limit set,
+			// it means all rows will be exhausted, so no need to pause this portal.
+			if tcmd.Limit == 0 && portal.pauseInfo != nil && portal.pauseInfo.curRes == nil {
+				portal.pauseInfo = nil
+			}
+
 			stmtRes := ex.clientComm.CreateStatementResult(
 				portal.Stmt.AST,
 				// The client is using the extended protocol, so no row description is
@@ -2186,6 +2219,9 @@ func (ex *connExecutor) execCmd() (retErr error) {
 				ex.implicitTxn(),
 				portal.portalPausablity,
 			)
+			if portal.pauseInfo != nil {
+				portal.pauseInfo.curRes = stmtRes
+			}
 			res = stmtRes
 
 			// In the extended protocol, autocommit is not always allowed. The postgres
@@ -2204,6 +2240,8 @@ func (ex *connExecutor) execCmd() (retErr error) {
 		// - ex.statsCollector merely contains a copy of the times, that
 		//   was created when the statement started executing (via the
 		//   reset() method).
+		// TODO(sql-sessions): fix the phase time for pausable portals.
+		// https://github.com/cockroachdb/cockroach/issues/99410
 		ex.statsCollector.PhaseTimes().SetSessionPhaseTime(sessionphase.SessionQueryServiced, timeutil.Now())
 		if err != nil {
 			return err
@@ -2266,9 +2304,10 @@ func (ex *connExecutor) execCmd() (retErr error) {
 		ex.phaseTimes.SetSessionPhaseTime(sessionphase.SessionStartParse, tcmd.ParseStart)
 		ex.phaseTimes.SetSessionPhaseTime(sessionphase.SessionEndParse, tcmd.ParseEnd)
 
-		res = ex.clientComm.CreateCopyInResult(pos)
+		copyRes := ex.clientComm.CreateCopyInResult(tcmd, pos)
+		res = copyRes
 		stmtCtx := withStatement(ctx, tcmd.Stmt)
-		ev, payload = ex.execCopyIn(stmtCtx, tcmd)
+		ev, payload = ex.execCopyIn(stmtCtx, tcmd, copyRes)
 
 		// Note: we write to ex.statsCollector.phaseTimes, instead of ex.phaseTimes,
 		// because:
@@ -2281,9 +2320,10 @@ func (ex *connExecutor) execCmd() (retErr error) {
 		ex.phaseTimes.SetSessionPhaseTime(sessionphase.SessionQueryReceived, tcmd.TimeReceived)
 		ex.phaseTimes.SetSessionPhaseTime(sessionphase.SessionStartParse, tcmd.ParseStart)
 		ex.phaseTimes.SetSessionPhaseTime(sessionphase.SessionEndParse, tcmd.ParseEnd)
-		res = ex.clientComm.CreateCopyOutResult(pos)
+		copyRes := ex.clientComm.CreateCopyOutResult(tcmd, pos)
+		res = copyRes
 		stmtCtx := withStatement(ctx, tcmd.Stmt)
-		ev, payload = ex.execCopyOut(stmtCtx, tcmd)
+		ev, payload = ex.execCopyOut(stmtCtx, tcmd, copyRes)
 
 		// Note: we write to ex.statsCollector.phaseTimes, instead of ex.phaseTimes,
 		// because:
@@ -2311,9 +2351,26 @@ func (ex *connExecutor) execCmd() (retErr error) {
 
 	var advInfo advanceInfo
 
+	// We close all pausable portals when we encounter err payload, otherwise
+	// there will be leftover bytes.
+	shouldClosePausablePortals := func(payload fsm.EventPayload) bool {
+		switch payload.(type) {
+		case eventNonRetriableErrPayload, eventRetriableErrPayload:
+			return true
+		default:
+			return false
+		}
+	}
+
 	// If an event was generated, feed it to the state machine.
 	if ev != nil {
 		var err error
+		if shouldClosePausablePortals(payload) {
+			// We need this as otherwise, there'll be leftover bytes when
+			// txnState.finishSQLTxn() is being called, as the underlying resources of
+			// pausable portals hasn't been cleared yet.
+			ex.extraTxnState.prepStmtsNamespace.closeAllPausablePortals(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc)
+		}
 		advInfo, err = ex.txnStateTransitionsApplyWrapper(ev, payload, res, pos)
 		if err != nil {
 			return err
@@ -2362,6 +2419,16 @@ func (ex *connExecutor) execCmd() (retErr error) {
 			ex.sessionEventf(ctx, "execution error: %s", pe.errorCause())
 			if resErr == nil {
 				res.SetError(pe.errorCause())
+			}
+		}
+		// For a pausable portal, we don't log the affected rows until we close the
+		// portal. However, we update the result for each execution. Thus, we need
+		// to accumulate the number of affected rows before closing the result.
+		if tcmd, ok := cmd.(*ExecPortal); ok {
+			if portal, ok := ex.extraTxnState.prepStmtsNamespace.portals[tcmd.Name]; ok {
+				if portal.pauseInfo != nil {
+					portal.pauseInfo.dispatchToExecutionEngine.rowsAffected += res.(RestrictedCommandResult).RowsAffected()
+				}
 			}
 		}
 		res.Close(ctx, stateToTxnStatusIndicator(ex.machine.CurState()))
@@ -2586,7 +2653,7 @@ func isCopyToExternalStorage(cmd CopyIn) bool {
 }
 
 func (ex *connExecutor) execCopyOut(
-	ctx context.Context, cmd CopyOut,
+	ctx context.Context, cmd CopyOut, res CopyOutResult,
 ) (retEv fsm.Event, retPayload fsm.EventPayload) {
 	// First handle connExecutor state transitions.
 	if _, isNoTxn := ex.machine.CurState().(stateNoTxn); isNoTxn {
@@ -2774,16 +2841,11 @@ func (ex *connExecutor) execCopyOut(
 		// above.
 		txn := ex.planner.Txn()
 		var err error
-		if numOutputRows, err = runCopyTo(ctx, &ex.planner, txn, cmd); err != nil {
+		if numOutputRows, err = runCopyTo(ctx, &ex.planner, txn, cmd, res); err != nil {
 			return err
 		}
 
-		// Finalize execution by sending the statement tag and number of rows read.
-		dummy := tree.CopyTo{}
-		tag := []byte(dummy.StatementTag())
-		tag = append(tag, ' ')
-		tag = strconv.AppendInt(tag, int64(numOutputRows), 10 /* base */)
-		return cmd.Conn.SendCommandComplete(tag)
+		return nil
 	}); copyErr != nil {
 		ev := eventNonRetriableErr{IsCommit: fsm.False}
 		payload := eventNonRetriableErrPayload{err: copyErr}
@@ -2809,7 +2871,7 @@ func (ex *connExecutor) setCopyLoggingFields(stmt parser.Statement) {
 // connection any more until this returns. The copyMachine will do the reading
 // and writing up to the CommandComplete message.
 func (ex *connExecutor) execCopyIn(
-	ctx context.Context, cmd CopyIn,
+	ctx context.Context, cmd CopyIn, res CopyInResult,
 ) (retEv fsm.Event, retPayload fsm.EventPayload) {
 	// First handle connExecutor state transitions.
 	if _, isNoTxn := ex.machine.CurState().(stateNoTxn); isNoTxn {
@@ -2867,6 +2929,7 @@ func (ex *connExecutor) execCopyIn(
 		var numInsertedRows int
 		if cm != nil {
 			numInsertedRows = cm.numInsertedRows()
+			res.SetRowsAffected(ctx, numInsertedRows)
 		}
 		// These fields are not available in COPY, so use the empty value.
 		f := tree.NewFmtCtx(tree.FmtHideConstants)
@@ -3600,6 +3663,11 @@ func (ex *connExecutor) txnStateTransitionsApplyWrapper(
 		fallthrough
 	case txnRollback:
 		ex.resetExtraTxnState(ex.Ctx(), advInfo.txnEvent)
+		// Since we're doing a complete rollback, there's no need to keep the
+		// prepared stmts for a txn rewind.
+		ex.extraTxnState.prepStmtsNamespaceAtTxnRewindPos.closeAllPortals(
+			ex.Ctx(), &ex.extraTxnState.prepStmtsNamespaceMemAcc,
+		)
 	case txnRestart:
 		// In addition to resetting the extraTxnState, the restart event may
 		// also need to reset the sqlliveness.Session.

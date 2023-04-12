@@ -38,6 +38,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/desctestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -52,7 +53,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/workload/workloadsql"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,7 +61,7 @@ const (
 	multiNode                   = 3
 	backupRestoreDefaultRanges  = 10
 	backupRestoreRowPayloadSize = 100
-	localFoo                    = "nodelocal://0/foo"
+	localFoo                    = "nodelocal://1/foo"
 )
 
 // smallEngineBlocks configures Pebble with a block size of 1 byte, to provoke
@@ -99,6 +99,9 @@ func backupRestoreTestSetupWithParams(
 
 	params.ServerArgs.Knobs.KeyVisualizer = &keyvisualizer.TestingKnobs{
 		SkipJobBootstrap:        true,
+		SkipZoneConfigBootstrap: true,
+	}
+	params.ServerArgs.Knobs.SQLStatsKnobs = &sqlstats.TestingKnobs{
 		SkipZoneConfigBootstrap: true,
 	}
 	tc = testcluster.StartTestCluster(t, clusterSize, params)
@@ -630,14 +633,18 @@ func upsertUntilBackpressure(
 	t *testing.T, rRand *rand.Rand, conn *gosql.DB, database, table string,
 ) {
 	t.Helper()
-	for i := 1; i < 50; i++ {
+	testutils.SucceedsSoon(t, func() error {
 		_, err := conn.Exec(fmt.Sprintf("UPSERT INTO %s.%s VALUES (1, $1)", database, table),
-			randutil.RandBytes(rRand, 5<<20))
-		if testutils.IsError(err, "backpressure") {
-			return
+			randutil.RandBytes(rRand, 1<<15))
+		if err == nil {
+			return errors.New("expected `backpressure` error")
 		}
-	}
-	assert.Fail(t, "expected `backpressure` error")
+
+		if !testutils.IsError(err, "backpressure") {
+			return errors.NewAssertionErrorWithWrappedErrf(err, "expected `backpressure` error")
+		}
+		return nil
+	})
 }
 
 // requireRecoveryEvent fetches all available log entries on disk after

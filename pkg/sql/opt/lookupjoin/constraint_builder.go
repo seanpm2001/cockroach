@@ -179,7 +179,7 @@ func (b *ConstraintBuilder) Build(
 	firstIdxCol := b.table.IndexColumnID(index, 0)
 	if _, ok := rightEq.Find(firstIdxCol); !ok {
 		if _, ok := b.findComputedColJoinEquality(b.table, firstIdxCol, rightEqSet); !ok {
-			if !HasJoinFilterConstants(allFilters, firstIdxCol, b.evalCtx) {
+			if _, _, ok := FindJoinFilterConstants(allFilters, firstIdxCol, b.evalCtx); !ok {
 				if _, ok := rightCmp.Find(firstIdxCol); !ok {
 					return Constraint{}, false
 				}
@@ -191,6 +191,7 @@ func (b *ConstraintBuilder) Build(
 	// an equality with another column or a constant.
 	numIndexKeyCols := index.LaxKeyColumnCount()
 
+	keyCols := make(opt.ColList, 0, numIndexKeyCols)
 	var derivedEquivCols opt.ColSet
 	// Don't change the selectivity estimate of this join vs. other joins which
 	// don't use derivedFkOnFilters. Add column IDs from these filters to the set
@@ -211,16 +212,14 @@ func (b *ConstraintBuilder) Build(
 		}
 	}
 
-	colsAlloc := make(opt.ColList, numIndexKeyCols*2)
-	keyCols := colsAlloc[0:0:numIndexKeyCols]
-	rightSideCols := colsAlloc[numIndexKeyCols : numIndexKeyCols : numIndexKeyCols*2]
+	rightSideCols := make(opt.ColList, 0, numIndexKeyCols)
 	var inputProjections memo.ProjectionsExpr
 	var lookupExpr memo.FiltersExpr
 	var allLookupFilters memo.FiltersExpr
 	var filterOrdsToExclude intsets.Fast
 	foundLookupCols := false
 	lookupExprRequired := false
-	var remainingFilters memo.FiltersExpr
+	remainingFilters := make(memo.FiltersExpr, 0, len(onFilters))
 
 	// addEqualityColumns adds the given columns as an equality in keyCols if
 	// lookupExprRequired is false. Otherwise, the equality is added as an
@@ -383,7 +382,6 @@ func (b *ConstraintBuilder) Build(
 			allLookupFilters = append(allLookupFilters, allFilters[filterIdx])
 			filterOrdsToExclude.Add(filterIdx)
 			if remaining != nil {
-				remainingFilters = make(memo.FiltersExpr, 0, len(onFilters))
 				remainingFilters = append(remainingFilters, *remaining)
 			}
 		}
@@ -416,9 +414,6 @@ func (b *ConstraintBuilder) Build(
 	// Reduce the remaining filters.
 	for i := range onFilters {
 		if !filterOrdsToExclude.Contains(i) {
-			if remainingFilters == nil {
-				remainingFilters = make(memo.FiltersExpr, 0, len(onFilters))
-			}
 			remainingFilters = append(remainingFilters, onFilters[i])
 		}
 	}

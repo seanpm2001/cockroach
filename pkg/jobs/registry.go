@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -96,7 +97,6 @@ type Registry struct {
 
 	ac        log.AmbientContext
 	stopper   *stop.Stopper
-	db        isql.DB
 	clock     *hlc.Clock
 	clusterID *base.ClusterIDContainer
 	nodeID    *base.SQLIDContainer
@@ -111,26 +111,15 @@ type Registry struct {
 	adoptionCh  chan adoptionNotice
 	sqlInstance sqlliveness.Instance
 
-	// internalDB provides a way for jobs to create internal executors.
-	// This is rarely needed, and usually job resumers should
-	// use the internal executor from the JobExecCtx. The intended user of this
-	// interface is the schema change job resumer, which needs to set the
-	// tableCollectionModifier on the internal executor to different values in
-	// multiple concurrent queries. This situation is an exception to the internal
-	// executor generally being a stateless wrapper, and makes it impossible to
-	// reuse the same internal executor across all the queries (without
-	// refactoring to get rid of the tableCollectionModifier field, which we
-	// should do eventually).
+	// db is used by the jobs subsystem to manage job records.
 	//
-	// Note that, while this API is not ideal, internal executors are basically
-	// lightweight wrappers requiring no additional teardown. There's not much
-	// cost incurred in creating these.
+	// This isql.DB is instantiated with special parameters that are
+	// tailored to job management. It is not suitable for execution of
+	// SQL queries by job resumers.
 	//
-	// TODO (lucy): We should refactor and get rid of the tableCollectionModifier
-	// field. Modifying the TableCollection is basically a per-query operation
-	// and should be a per-query setting. #34304 is the issue for creating/
-	// improving this API.
-	internalDB isql.DB
+	// Instead resumer functions should reach for the isql.DB that comes
+	// from the SQl executor config.
+	db isql.DB
 
 	// if non-empty, indicates path to file that prevents any job adoptions.
 	preventAdoptionFile     string
@@ -162,6 +151,9 @@ type Registry struct {
 		// do.
 		draining bool
 	}
+
+	drainJobs                chan struct{}
+	startedControllerTasksWG sync.WaitGroup
 
 	// withSessionEvery ensures that logging when failing to get a live session
 	// is not too loud.
@@ -206,7 +198,6 @@ func MakeRegistry(
 	ac log.AmbientContext,
 	stopper *stop.Stopper,
 	clock *hlc.Clock,
-	db isql.DB,
 	clusterID *base.ClusterIDContainer,
 	nodeID *base.SQLIDContainer,
 	sqlInstance sqlliveness.Instance,
@@ -222,7 +213,6 @@ func MakeRegistry(
 		ac:                      ac,
 		stopper:                 stopper,
 		clock:                   clock,
-		db:                      db,
 		clusterID:               clusterID,
 		nodeID:                  nodeID,
 		sqlInstance:             sqlInstance,
@@ -236,6 +226,7 @@ func MakeRegistry(
 		// if a notification is already queued.
 		adoptionCh:       make(chan adoptionNotice, 1),
 		withSessionEvery: log.Every(time.Second),
+		drainJobs:        make(chan struct{}),
 	}
 	if knobs != nil {
 		r.knobs = *knobs
@@ -253,7 +244,7 @@ func MakeRegistry(
 // executor. We expose this separately from the constructor to avoid a circular
 // dependency.
 func (r *Registry) SetInternalDB(db isql.DB) {
-	r.internalDB = db
+	r.db = db
 }
 
 // MetricsStruct returns the metrics for production monitoring of each job type.
@@ -501,7 +492,7 @@ func batchJobInsertStmt(
 
 	// TODO(adityamaru: Remove this once we are outside the compatability
 	// window for 22.2.
-	if r.settings.Version.IsActive(ctx, clusterversion.V23_2StopWritingPayloadAndProgressToSystemJobs) {
+	if r.settings.Version.IsActive(ctx, clusterversion.V23_1StopWritingPayloadAndProgressToSystemJobs) {
 		columns = []string{`id`, `created`, `status`, `claim_session_id`, `claim_instance_id`, `job_type`}
 		valueFns = map[string]func(*Job) (interface{}, error){
 			`id`:                func(job *Job) (interface{}, error) { return job.ID(), nil },
@@ -615,7 +606,7 @@ func (r *Registry) CreateJobWithTxn(
 		cols := []string{"id", "created", "status", "payload", "progress", "claim_session_id", "claim_instance_id", "job_type"}
 		vals := []interface{}{jobID, created, StatusRunning, payloadBytes, progressBytes, s.ID().UnsafeBytes(), r.ID(), jobType.String()}
 		log.Infof(ctx, "active version is %s", r.settings.Version.ActiveVersion(ctx))
-		if r.settings.Version.IsActive(ctx, clusterversion.V23_2StopWritingPayloadAndProgressToSystemJobs) {
+		if r.settings.Version.IsActive(ctx, clusterversion.V23_1StopWritingPayloadAndProgressToSystemJobs) {
 			cols = []string{"id", "created", "status", "claim_session_id", "claim_instance_id", "job_type"}
 			vals = []interface{}{jobID, created, StatusRunning, s.ID().UnsafeBytes(), r.ID(), jobType.String()}
 		}
@@ -739,7 +730,7 @@ func (r *Registry) CreateAdoptableJobWithTxn(
 		if !r.settings.Version.IsActive(ctx, clusterversion.V23_1AddTypeColumnToJobsTable) {
 			nCols -= 1
 		}
-		if r.settings.Version.IsActive(ctx, clusterversion.V23_2StopWritingPayloadAndProgressToSystemJobs) {
+		if r.settings.Version.IsActive(ctx, clusterversion.V23_1StopWritingPayloadAndProgressToSystemJobs) {
 			cols = []string{"id", "status", "created_by_type", "created_by_id", "job_type"}
 			placeholders = []string{"$1", "$2", "$3", "$4", "$5"}
 			values = []interface{}{jobID, StatusRunning, createdByType, createdByID, typ}
@@ -1065,7 +1056,10 @@ func (r *Registry) Start(ctx context.Context, stopper *stop.Stopper) error {
 		}
 	})
 
+	r.startedControllerTasksWG.Add(1)
 	if err := stopper.RunAsyncTask(ctx, "jobs/cancel", func(ctx context.Context) {
+		defer r.startedControllerTasksWG.Done()
+
 		ctx, cancel := stopper.WithCancelOnQuiesce(ctx)
 		defer cancel()
 
@@ -1080,6 +1074,10 @@ func (r *Registry) Start(ctx context.Context, stopper *stop.Stopper) error {
 				// Note: the jobs are cancelled by virtue of being run with a
 				// WithCancelOnQuesce context. See the resumeJob() function.
 				return
+			case <-r.drainJobs:
+				log.Warningf(ctx, "canceling all adopted jobs due to graceful drain request")
+				r.cancelAllAdoptedJobs()
+				return
 			case <-lc.timer.C:
 				lc.timer.Read = true
 				cancelLoopTask(ctx)
@@ -1087,9 +1085,14 @@ func (r *Registry) Start(ctx context.Context, stopper *stop.Stopper) error {
 			}
 		}
 	}); err != nil {
+		r.startedControllerTasksWG.Done()
 		return err
 	}
+
+	r.startedControllerTasksWG.Add(1)
 	if err := stopper.RunAsyncTask(ctx, "jobs/gc", func(ctx context.Context) {
+		defer r.startedControllerTasksWG.Done()
+
 		ctx, cancel := stopper.WithCancelOnQuiesce(ctx)
 		defer cancel()
 
@@ -1110,6 +1113,8 @@ func (r *Registry) Start(ctx context.Context, stopper *stop.Stopper) error {
 				lc.onUpdate()
 			case <-stopper.ShouldQuiesce():
 				return
+			case <-r.drainJobs:
+				return
 			case <-lc.timer.C:
 				lc.timer.Read = true
 				old := timeutil.Now().Add(-1 * retentionDuration())
@@ -1120,9 +1125,14 @@ func (r *Registry) Start(ctx context.Context, stopper *stop.Stopper) error {
 			}
 		}
 	}); err != nil {
+		r.startedControllerTasksWG.Done()
 		return err
 	}
-	return stopper.RunAsyncTask(ctx, "jobs/adopt", func(ctx context.Context) {
+
+	r.startedControllerTasksWG.Add(1)
+	if err := stopper.RunAsyncTask(ctx, "jobs/adopt", func(ctx context.Context) {
+		defer r.startedControllerTasksWG.Done()
+
 		ctx, cancel := stopper.WithCancelOnQuiesce(ctx)
 		defer cancel()
 		lc, cleanup := makeLoopController(r.settings, adoptIntervalSetting, r.knobs.IntervalOverrides.Adopt)
@@ -1132,6 +1142,8 @@ func (r *Registry) Start(ctx context.Context, stopper *stop.Stopper) error {
 			case <-lc.updated:
 				lc.onUpdate()
 			case <-stopper.ShouldQuiesce():
+				return
+			case <-r.drainJobs:
 				return
 			case shouldClaim := <-r.adoptionCh:
 				// Try to adopt the most recently created job.
@@ -1146,7 +1158,11 @@ func (r *Registry) Start(ctx context.Context, stopper *stop.Stopper) error {
 				lc.onExecute()
 			}
 		}
-	})
+	}); err != nil {
+		r.startedControllerTasksWG.Done()
+		return err
+	}
+	return nil
 }
 
 func (r *Registry) maybeCancelJobs(ctx context.Context, s sqlliveness.Session) {
@@ -1915,14 +1931,22 @@ func (r *Registry) IsDraining() bool {
 	return r.mu.draining
 }
 
+// WaitForJobShutdown(ctx context.Context) {
+func (r *Registry) WaitForRegistryShutdown(ctx context.Context) {
+	log.Infof(ctx, "starting to wait for job registry to shut down")
+	defer log.Infof(ctx, "job registry tasks successfully shut down")
+	r.startedControllerTasksWG.Wait()
+}
+
 // SetDraining informs the job system if the node is draining.
-//
-// NB: Check the implementation of drain before adding code that would
-// make this block.
-func (r *Registry) SetDraining(draining bool) {
+func (r *Registry) SetDraining() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.mu.draining = draining
+	alreadyDraining := r.mu.draining
+	r.mu.draining = true
+	if !alreadyDraining {
+		close(r.drainJobs)
+	}
 }
 
 // TestingIsJobIdle returns true if the job is adopted and currently idle.

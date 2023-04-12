@@ -42,8 +42,7 @@ go_test(
         "debug_remote_test.go",
         "main_test.go",
     ],
-    # Note: we overide bazel timeout to 1800s using test_timeout.
-    args = ["-test.timeout=1795s"],
+    args = ["-test.timeout=3595s"],
     data = glob([
         "testdata/**",
         "compose/**",

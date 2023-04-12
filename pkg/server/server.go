@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/blobs"
+	"github.com/cockroachdb/cockroach/pkg/blobs/blobspb"
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
@@ -76,6 +78,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigkvsubscriber"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigptsreader"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigreporter"
+	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigstore"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/catalog/schematelemetry" // register schedules declared outside of pkg/sql
@@ -105,6 +108,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/rangedesc"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/schedulerlatency"
+	"github.com/cockroachdb/cockroach/pkg/util/startup"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/ptp"
@@ -176,7 +180,7 @@ type Server struct {
 	spanConfigSubscriber spanconfig.KVSubscriber
 	spanConfigReporter   spanconfig.Reporter
 
-	tenantCapabilitiesWatcher tenantcapabilities.Watcher
+	tenantCapabilitiesWatcher *tenantcapabilitieswatcher.Watcher
 
 	// pgL is the SQL listener for pgwire connections coming over the network.
 	pgL net.Listener
@@ -623,6 +627,15 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		keys.SystemSQLCodec, clock, rangeFeedFactory, &cfg.DefaultZoneConfig,
 	)
 
+	tenantCapabilitiesWatcher := tenantcapabilitieswatcher.New(
+		clock,
+		rangeFeedFactory,
+		keys.TenantsTableID,
+		stopper,
+		1<<20, /* 1 MB */
+		tenantCapabilitiesTestingKnobs,
+	)
+
 	var spanConfig struct {
 		// kvAccessor powers the span configuration RPCs and the host tenant's
 		// reconciliation job.
@@ -668,6 +681,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 				1<<20, /* 1 MB */
 				fallbackConf,
 				cfg.Settings,
+				spanconfigstore.NewBoundsReader(tenantCapabilitiesWatcher),
 				spanConfigKnobs,
 				registry,
 			)
@@ -791,15 +805,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		clock, rangeFeedFactory, stopper, st,
 	)
 
-	tenantCapabilitiesWatcher := tenantcapabilitieswatcher.New(
-		clock,
-		rangeFeedFactory,
-		keys.TenantsTableID,
-		stopper,
-		1<<20, /* 1 MB */
-		tenantCapabilitiesTestingKnobs,
-	)
-
 	node := NewNode(
 		storeCfg,
 		recorder,
@@ -820,6 +825,13 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	kvserver.RegisterPerReplicaServer(grpcServer.Server, node.perReplicaServer)
 	kvserver.RegisterPerStoreServer(grpcServer.Server, node.perReplicaServer)
 	ctpb.RegisterSideTransportServer(grpcServer.Server, ctReceiver)
+
+	// Create blob service for inter-node file sharing.
+	blobService, err := blobs.NewBlobService(cfg.Settings.ExternalIODir)
+	if err != nil {
+		return nil, errors.Wrap(err, "creating blob service")
+	}
+	blobspb.RegisterBlobServer(grpcServer.Server, blobService)
 
 	{ // wire up admission control's scheduler latency listener
 		slcbID := schedulerlatency.RegisterCallback(
@@ -1283,6 +1295,8 @@ func (li listenerInfo) Iter() map[string]string {
 // should represent the general startup operation.
 func (s *Server) PreStart(ctx context.Context) error {
 	ctx = s.AnnotateCtx(ctx)
+	done := startup.Begin(ctx)
+	defer done()
 
 	// The following initialization is mirrored in
 	// (*SQLServerWrapper).PreStart. Please keep them in sync.
@@ -1327,24 +1341,6 @@ func (s *Server) PreStart(ctx context.Context) error {
 		workersCtx, &s.cfg.BaseConfig, uiTLSConfig, s.stopper, s.serverController.httpMux); err != nil {
 		return err
 	}
-
-	// Initialize the external storage builders configuration params now that the
-	// engines have been created. The object can be used to create ExternalStorage
-	// objects hereafter.
-	ieMon := sql.MakeInternalExecutorMemMonitor(sql.MemoryMetrics{}, s.ClusterSettings())
-	ieMon.StartNoReserved(ctx, s.PGServer().SQLServer.GetBytesMonitor())
-	s.stopper.AddCloser(stop.CloserFn(func() { ieMon.Stop(ctx) }))
-	s.externalStorageBuilder.init(
-		ctx,
-		s.cfg.ExternalIODirConfig,
-		s.st,
-		s.nodeIDContainer,
-		s.nodeDialer,
-		s.cfg.TestingKnobs,
-		s.sqlServer.execCfg.InternalDB.CloneWithMemoryMonitor(sql.MemoryMetrics{}, ieMon),
-		nil, /* TenantExternalIORecorder */
-		s.registry,
-	)
 
 	// Filter out self from the gossip bootstrap addresses.
 	filtered := s.cfg.FilterGossipBootstrapAddresses(ctx)
@@ -1801,6 +1797,13 @@ func (s *Server) PreStart(ctx context.Context) error {
 	// to bypass admission control.
 	s.storeGrantCoords.SetPebbleMetricsProvider(ctx, s.node, s.node)
 
+	// Connect the engines to the disk stats map constructor.
+	// This also needs to wait until after `waitForAdditionalStoreInit` returns,
+	// as the store IDs may not be known until then.
+	if err := s.node.registerEnginesForDiskStatsMap(s.cfg.Stores.Specs, s.engines); err != nil {
+		return errors.Wrapf(err, "failed to register engines for the disk stats map")
+	}
+
 	// Once all stores are initialized, check if offline storage recovery
 	// was done prior to start and record any actions appropriately.
 	logPendingLossOfQuorumRecoveryEvents(workersCtx, s.node.stores)
@@ -1906,6 +1909,25 @@ func (s *Server) PreStart(ctx context.Context) error {
 		return err
 	}
 
+	// Initialize the external storage builders configuration params now that the
+	// engines have been created. The object can be used to create ExternalStorage
+	// objects hereafter.
+	ieMon := sql.MakeInternalExecutorMemMonitor(sql.MemoryMetrics{}, s.ClusterSettings())
+	ieMon.StartNoReserved(ctx, s.PGServer().SQLServer.GetBytesMonitor())
+	s.stopper.AddCloser(stop.CloserFn(func() { ieMon.Stop(ctx) }))
+	s.externalStorageBuilder.init(
+		ctx,
+		s.cfg.ExternalIODirConfig,
+		s.st,
+		s.sqlServer.sqlIDContainer,
+		s.nodeDialer,
+		s.cfg.TestingKnobs,
+		true, /* allowLocalFastPath */
+		s.sqlServer.execCfg.InternalDB.CloneWithMemoryMonitor(sql.MemoryMetrics{}, ieMon),
+		nil, /* TenantExternalIORecorder */
+		s.registry,
+	)
+
 	// If enabled, start reporting diagnostics.
 	if s.cfg.StartDiagnosticsReporting && !cluster.TelemetryOptOut {
 		s.startDiagnostics(workersCtx)
@@ -1920,11 +1942,6 @@ func (s *Server) PreStart(ctx context.Context) error {
 		if err := s.eventsExporter.Start(ctx, s.stopper); err != nil {
 			return errors.Wrapf(err, "failed to start events exporter")
 		}
-	}
-
-	// Connect the engines to the disk stats map constructor.
-	if err := s.node.registerEnginesForDiskStatsMap(s.cfg.Stores.Specs, s.engines); err != nil {
-		return errors.Wrapf(err, "failed to register engines for the disk stats map")
 	}
 
 	if storage.WorkloadCollectorEnabled {

@@ -1226,23 +1226,45 @@ func (txn *Txn) applyDeadlineToBoundedStaleness(
 }
 
 // GetLeafTxnInputState returns the LeafTxnInputState information for this
-// transaction for use with NewLeafTxn(), when distributing the state of the
-// current transaction to multiple distributed transaction coordinators.
-//
-// If the transaction is already aborted or otherwise in a state that cannot
-// make progress, it returns an error. If the transaction is aborted, the error
-// returned will be a retryable one. In such cases, the caller is responsible
-// for handling the error before another attempt by calling PrepareForRetry. Use
-// of the transaction before doing so will continue to be rejected.
-func (txn *Txn) GetLeafTxnInputState(ctx context.Context) (*roachpb.LeafTxnInputState, error) {
+// transaction for use with InitializeLeafTxn(), when distributing
+// the state of the current transaction to multiple distributed
+// transaction coordinators.
+func (txn *Txn) GetLeafTxnInputState(ctx context.Context) *roachpb.LeafTxnInputState {
 	if txn.typ != RootTxn {
-		return nil, errors.WithContextTags(
-			errors.AssertionFailedf("GetLeafTxnInputState() called on leaf txn"), ctx)
+		panic(errors.WithContextTags(errors.AssertionFailedf("GetLeafTxnInputState() called on leaf txn"), ctx))
 	}
 
 	txn.mu.Lock()
 	defer txn.mu.Unlock()
-	return txn.mu.sender.GetLeafTxnInputState(ctx)
+	ts, err := txn.mu.sender.GetLeafTxnInputState(ctx, AnyTxnStatus)
+	if err != nil {
+		log.Fatalf(ctx, "unexpected error from GetLeafTxnInputState(AnyTxnStatus): %s", err)
+	}
+	return ts
+}
+
+// GetLeafTxnInputStateOrRejectClient is like GetLeafTxnInputState
+// except, if the transaction is already aborted or otherwise in state
+// that cannot make progress, it returns an error. If the transaction aborted
+// the error returned will be a retryable one; as such, the caller is
+// responsible for handling the error before another attempt by calling
+// PrepareForRetry. Use of the transaction before doing so will continue to be
+// rejected.
+func (txn *Txn) GetLeafTxnInputStateOrRejectClient(
+	ctx context.Context,
+) (*roachpb.LeafTxnInputState, error) {
+	if txn.typ != RootTxn {
+		return nil, errors.WithContextTags(
+			errors.AssertionFailedf("GetLeafTxnInputStateOrRejectClient() called on leaf txn"), ctx)
+	}
+
+	txn.mu.Lock()
+	defer txn.mu.Unlock()
+	tfs, err := txn.mu.sender.GetLeafTxnInputState(ctx, OnlyPending)
+	if err != nil {
+		return nil, err
+	}
+	return tfs, nil
 }
 
 // GetLeafTxnFinalState returns the LeafTxnFinalState information for this
@@ -1257,11 +1279,11 @@ func (txn *Txn) GetLeafTxnFinalState(ctx context.Context) (*roachpb.LeafTxnFinal
 
 	txn.mu.Lock()
 	defer txn.mu.Unlock()
-	tfs, err := txn.mu.sender.GetLeafTxnFinalState(ctx)
+	tfs, err := txn.mu.sender.GetLeafTxnFinalState(ctx, AnyTxnStatus)
 	if err != nil {
 		return nil, errors.WithContextTags(
 			errors.NewAssertionErrorWithWrappedErrf(err,
-				"unexpected error from GetLeafTxnFinalState()"), ctx)
+				"unexpected error from GetLeafTxnFinalState(AnyTxnStatus)"), ctx)
 	}
 	return tfs, nil
 }
@@ -1461,13 +1483,6 @@ func (txn *Txn) Step(ctx context.Context) error {
 	txn.mu.Lock()
 	defer txn.mu.Unlock()
 	return txn.mu.sender.Step(ctx)
-}
-
-// GetReadSeqNum gets the read sequence number for this transaction.
-func (txn *Txn) GetReadSeqNum() enginepb.TxnSeq {
-	txn.mu.Lock()
-	defer txn.mu.Unlock()
-	return txn.mu.sender.GetReadSeqNum()
 }
 
 // SetReadSeqNum sets the read sequence number for this transaction.

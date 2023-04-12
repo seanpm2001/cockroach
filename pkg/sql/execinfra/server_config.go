@@ -37,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
+	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/limit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -44,7 +45,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/pebble/vfs"
 	"github.com/marusama/semaphore"
 )
 
@@ -95,7 +95,7 @@ type ServerConfig struct {
 
 	// TempFS is used by the vectorized execution engine to store columns when the
 	// working set is larger than can be stored in memory.
-	TempFS vfs.FS
+	TempFS fs.FS
 
 	// VecFDSemaphore is a weighted semaphore that restricts the number of open
 	// file descriptors in the vectorized engine.

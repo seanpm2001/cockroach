@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/cluster"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
@@ -87,6 +86,7 @@ func registerRubyPG(r registry.Registry) {
 			"install ruby 3.1.2",
 			`mkdir -p ruby-install && \
         curl -fsSL https://github.com/postmodern/ruby-install/archive/v0.8.3.tar.gz | tar --strip-components=1 -C ruby-install -xz && \
+        sudo rm -rf /usr/local/bin/* && \
         sudo make -C ruby-install install && \
         sudo ruby-install --system ruby 3.1.2 && \
         sudo gem update --system`,
@@ -228,7 +228,6 @@ func registerRubyPG(r registry.Registry) {
 
 	r.Add(registry.TestSpec{
 		Name:       "ruby-pg",
-		Timeout:    1 * time.Hour,
 		Owner:      registry.OwnerSQLSessions,
 		Cluster:    r.MakeClusterSpec(1),
 		NativeLibs: registry.LibGEOS,

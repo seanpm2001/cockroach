@@ -305,12 +305,6 @@ var charts = []sectionDescription{
 				},
 			},
 			{
-				Title: "Restarted Ranges",
-				Metrics: []string{
-					"distsender.rangefeed.restart_ranges",
-				},
-			},
-			{
 				Title: "RPCs",
 				Metrics: []string{
 					"distsender.rpc.sent.local",
@@ -636,8 +630,8 @@ var charts = []sectionDescription{
 					"range.snapshots.applied-voter",
 					"range.snapshots.applied-initial",
 					"range.snapshots.applied-non-voter",
-					"range.snapshot.delegate.successes",
-					"range.snapshot.delegate.failures",
+					"range.snapshots.delegate.successes",
+					"range.snapshots.delegate.failures",
 				},
 			},
 			{
@@ -649,6 +643,7 @@ var charts = []sectionDescription{
 					"range.snapshots.recv-in-progress",
 					"range.snapshots.send-total-in-progress",
 					"range.snapshots.recv-total-in-progress",
+					"range.snapshots.delegate.in-progress",
 				},
 			},
 			{
@@ -1569,6 +1564,7 @@ var charts = []sectionDescription{
 					"changefeed.checkpoint_hist_nanos",
 					"changefeed.flush_hist_nanos",
 					"changefeed.sink_batch_hist_nanos",
+					"changefeed.parallel_io_queue_nanos",
 				},
 			},
 			{
@@ -1591,6 +1587,12 @@ var charts = []sectionDescription{
 					"changefeed.bytes.messages_pushback_nanos",
 					"changefeed.messages.messages_pushback_nanos",
 					"changefeed.flush.messages_pushback_nanos",
+				},
+			},
+			{
+				Title: "Sink IO",
+				Metrics: []string{
+					"changefeed.sink_io_inflight",
 				},
 			},
 			{
@@ -3093,6 +3095,14 @@ var charts = []sectionDescription{
 				Title:   "Tombstone Count",
 				Metrics: []string{"storage.keys.tombstone.count"},
 			},
+			{
+				Title:   "Pinned Keys Written",
+				Metrics: []string{"storage.compactions.keys.pinned.count"},
+			},
+			{
+				Title:   "Pinned Key Bytes Written",
+				Metrics: []string{"storage.compactions.keys.pinned.bytes"},
+			},
 		},
 	},
 	{
@@ -3240,6 +3250,29 @@ var charts = []sectionDescription{
 			{
 				Title:   "WAL Fsync Latency",
 				Metrics: []string{"storage.wal.fsync.latency"},
+			},
+			{
+				Title: "Iterator Block Loads",
+				Metrics: []string{
+					"storage.iterator.block-load.bytes",
+					"storage.iterator.block-load.cached-bytes",
+				},
+				AxisLabel: "Bytes",
+			},
+			{
+				Title:     "Iterator I/O",
+				Metrics:   []string{"storage.iterator.block-load.read-duration"},
+				AxisLabel: "Duration (nanos)",
+			},
+			{
+				Title: "Iterator Operations",
+				Metrics: []string{
+					"storage.iterator.external.seeks",
+					"storage.iterator.external.steps",
+					"storage.iterator.internal.seeks",
+					"storage.iterator.internal.steps",
+				},
+				AxisLabel: "Ops",
 			},
 		},
 	},
@@ -3668,7 +3701,7 @@ var charts = []sectionDescription{
 				},
 			},
 			{
-				Title: "Auto Config Runner Job",
+				Title: "Auto Config Top-level Runner Job",
 				Metrics: []string{
 					"jobs.auto_config_runner.fail_or_cancel_completed",
 					"jobs.auto_config_runner.fail_or_cancel_failed",
@@ -3676,6 +3709,28 @@ var charts = []sectionDescription{
 					"jobs.auto_config_runner.resume_completed",
 					"jobs.auto_config_runner.resume_failed",
 					"jobs.auto_config_runner.resume_retry_error",
+				},
+			},
+			{
+				Title: "Auto Config Per-environment Runner Jobs",
+				Metrics: []string{
+					"jobs.auto_config_env_runner.fail_or_cancel_completed",
+					"jobs.auto_config_env_runner.fail_or_cancel_failed",
+					"jobs.auto_config_env_runner.fail_or_cancel_retry_error",
+					"jobs.auto_config_env_runner.resume_completed",
+					"jobs.auto_config_env_runner.resume_failed",
+					"jobs.auto_config_env_runner.resume_retry_error",
+				},
+			},
+			{
+				Title: "Auto Config Tasks",
+				Metrics: []string{
+					"jobs.auto_config_task.fail_or_cancel_completed",
+					"jobs.auto_config_task.fail_or_cancel_failed",
+					"jobs.auto_config_task.fail_or_cancel_retry_error",
+					"jobs.auto_config_task.resume_completed",
+					"jobs.auto_config_task.resume_failed",
+					"jobs.auto_config_task.resume_retry_error",
 				},
 			},
 		},

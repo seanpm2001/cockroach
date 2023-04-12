@@ -76,13 +76,9 @@ func (n *explainVecNode) startExec(params runParams) error {
 	}
 	verbose := n.options.Flags[tree.ExplainFlagVerbose]
 	willDistribute := physPlan.Distribution.WillDistribute()
-	// When running EXPLAIN (VEC) we choose the option of "not recording stats"
-	// since we don't know whether the next invocation of the explained
-	// statement would result in the collection of execution stats or not.
-	const recordingStats = false
 	n.run.lines, err = colflow.ExplainVec(
 		params.ctx, flowCtx, flows, physPlan.LocalProcessors, nil, /* opChains */
-		distSQLPlanner.gatewaySQLInstanceID, verbose, willDistribute, recordingStats,
+		distSQLPlanner.gatewaySQLInstanceID, verbose, willDistribute,
 	)
 	if err != nil {
 		return err
@@ -110,7 +106,6 @@ func newFlowCtxForExplainPurposes(
 		NodeID:  planCtx.EvalContext().NodeID,
 		EvalCtx: planCtx.EvalContext(),
 		Mon:     monitor,
-		Txn:     p.txn,
 		Cfg: &execinfra.ServerConfig{
 			Settings:         p.execCfg.Settings,
 			LogicalClusterID: p.DistSQLPlanner().distSQLSrv.ServerConfig.LogicalClusterID,

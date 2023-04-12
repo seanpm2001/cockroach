@@ -224,9 +224,11 @@ const (
 	TODODelete_V22_2SystemUsersIDColumnIsBackfilled
 	// TODODelete_V22_2SetSystemUsersUserIDColumnNotNull sets the user_id column in system.users to not null.
 	TODODelete_V22_2SetSystemUsersUserIDColumnNotNull
-	// TODODelete_V22_2SQLSchemaTelemetryScheduledJobs adds an automatic schedule for SQL schema
+	// Permanent_V22_2SQLSchemaTelemetryScheduledJobs adds an automatic schedule for SQL schema
 	// telemetry logging jobs.
-	TODODelete_V22_2SQLSchemaTelemetryScheduledJobs
+	//
+	// This is a permanent migration which should exist forever.
+	Permanent_V22_2SQLSchemaTelemetryScheduledJobs
 	// TODODelete_V22_2SchemaChangeSupportsCreateFunction adds support of CREATE FUNCTION
 	// statement.
 	TODODelete_V22_2SchemaChangeSupportsCreateFunction
@@ -510,16 +512,13 @@ const (
 	// that are optimized for the console.
 	V23_1AddSystemActivityTables
 
-	// V23_1 is CockroachDB v23.1. It's used for all v23.1.x patch releases.
-	V23_1
-
-	// V23_2_Start demarcates the start of cluster versions stepped through during
-	// the process of upgrading from previous supported releases to 23.2.
-	V23_2Start
-
-	// V23_2StopWritingPayloadAndProgressToSystemJobs is the version where the
+	// V23_1StopWritingPayloadAndProgressToSystemJobs is the version where the
 	// payload and progress columns are no longer written to system.jobs.
-	V23_2StopWritingPayloadAndProgressToSystemJobs
+	V23_1StopWritingPayloadAndProgressToSystemJobs
+
+	// V23_1ChangeSQLStatsTTL is the version where the gc TTL was updated to all
+	// SQL Stats tables.
+	V23_1ChangeSQLStatsTTL
 
 	// *************************************************
 	// Step (1): Add new versions here.
@@ -651,7 +650,7 @@ var rawVersionsSingleton = keyedVersions{
 		Version: roachpb.Version{Major: 22, Minor: 1, Internal: 40},
 	},
 	{
-		Key:     TODODelete_V22_2SQLSchemaTelemetryScheduledJobs,
+		Key:     Permanent_V22_2SQLSchemaTelemetryScheduledJobs,
 		Version: roachpb.Version{Major: 22, Minor: 1, Internal: 42},
 	},
 	{
@@ -895,16 +894,12 @@ var rawVersionsSingleton = keyedVersions{
 		Version: roachpb.Version{Major: 22, Minor: 2, Internal: 94},
 	},
 	{
-		Key:     V23_1,
-		Version: roachpb.Version{Major: 23, Minor: 1, Internal: 0},
+		Key:     V23_1StopWritingPayloadAndProgressToSystemJobs,
+		Version: roachpb.Version{Major: 22, Minor: 2, Internal: 96},
 	},
 	{
-		Key:     V23_2Start,
-		Version: roachpb.Version{Major: 23, Minor: 1, Internal: 2},
-	},
-	{
-		Key:     V23_2StopWritingPayloadAndProgressToSystemJobs,
-		Version: roachpb.Version{Major: 23, Minor: 1, Internal: 4},
+		Key:     V23_1ChangeSQLStatsTTL,
+		Version: roachpb.Version{Major: 22, Minor: 2, Internal: 98},
 	},
 
 	// *************************************************
@@ -919,10 +914,9 @@ var rawVersionsSingleton = keyedVersions{
 // frozen. It can be forced to a specific value in two circumstances:
 // 1. forced to `false` on development branches: this is used for
 // upgrade testing purposes and should never be done in real clusters;
-// 2. forced to `false` on release branches: this allows running a
+// 2. forced to `true` on release branches: this allows running a
 // release binary in a dev cluster.
-var developmentBranch = !envutil.EnvOrDefaultBool("COCKROACH_TESTING_FORCE_RELEASE_BRANCH", false) ||
-	envutil.EnvOrDefaultBool("COCKROACH_FORCE_DEV_VERSION", false)
+var developmentBranch = envutil.EnvOrDefaultBool("COCKROACH_FORCE_DEV_VERSION", false)
 
 const (
 	// finalVersion should be set on a release branch to the minted final cluster
@@ -975,13 +969,13 @@ var versionsSingleton = func() keyedVersions {
 	return rawVersionsSingleton
 }()
 
-// V23_2 is a placeholder that will eventually be replaced by the actual 23.2
+// V23_1 is a placeholder that will eventually be replaced by the actual 23.1
 // version Key, but in the meantime it points to the latest Key. The placeholder
 // is defined so that it can be referenced in code that simply wants to check if
-// a cluster is running 23.2 and has completed all associated migrations; most
+// a cluster is running 23.1 and has completed all associated migrations; most
 // version gates can use this instead of defining their own version key if all
-// simply need to check is that the cluster has upgraded to 23.2.
-var V23_2 = versionsSingleton[len(versionsSingleton)-1].Key
+// simply need to check is that the cluster has upgraded to 23.1.
+var V23_1 = versionsSingleton[len(versionsSingleton)-1].Key
 
 const (
 	BinaryMinSupportedVersionKey = V22_2
@@ -998,7 +992,7 @@ var (
 	// comment).
 	binaryMinSupportedVersion = ByKey(BinaryMinSupportedVersionKey)
 
-	BinaryVersionKey = V23_2
+	BinaryVersionKey = V23_1
 	// binaryVersion is the version of this binary.
 	//
 	// This is the version that a new cluster will use when created.

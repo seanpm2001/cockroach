@@ -2031,7 +2031,7 @@ var builtinOidsArray = []string{
 	2054: `tsvectorin(input: anyelement) -> tsvector`,
 	2055: `crdb_internal.hide_sql_constants(val: string) -> string`,
 	2056: `crdb_internal.hide_sql_constants(val: string[]) -> string[]`,
-	2057: `crdb_internal.unsafe_optimize_system_database() -> bool`,
+	2057: ``, // formerly crdb_internal.unsafe_optimize_system_database() -> bool
 	2058: `parse_ident(qualified_identifier: string) -> string[]`,
 	2059: `parse_ident(qualified_identifier: string, strict: bool) -> string[]`,
 	2060: `pg_get_function_arguments(func_oid: oid) -> string`,
@@ -2378,6 +2378,7 @@ var builtinOidsArray = []string{
 	2404: `ts_rank(vector: tsvector, query: tsquery) -> float4`,
 	2405: `ts_rank(weights: float[], vector: tsvector, query: tsquery) -> float4`,
 	2406: `crdb_internal.fingerprint(span: bytes[], stripped: bool) -> int`,
+	2407: `crdb_internal.tenant_span() -> bytes[]`,
 }
 
 var builtinOidsBySignature map[string]oid.Oid

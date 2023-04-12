@@ -15,13 +15,13 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/allocatorimpl"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/keysutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -120,17 +120,17 @@ func TestDecommissionPreCheckEvaluation(t *testing.T) {
 	runQueries(setupQueries...)
 	alterQueries := []string{
 		"ALTER TABLE test.tblA CONFIGURE ZONE USING num_replicas = 3, constraints = '{+west: 1, +central: 1, +east: 1}', " +
-			"range_max_bytes = 500000000, range_min_bytes = 100",
+			"range_max_bytes = 500000, range_min_bytes = 100",
 		"ALTER TABLE test.tblB CONFIGURE ZONE USING num_replicas = 3, constraints = '{+east}', " +
-			"range_max_bytes = 500000000, range_min_bytes = 100",
+			"range_max_bytes = 500000, range_min_bytes = 100",
 	}
 	runQueries(alterQueries...)
 	tblAID, err := firstSvr.admin.queryTableID(ctx, username.RootUserName(), "test", "tblA")
 	require.NoError(t, err)
 	tblBID, err := firstSvr.admin.queryTableID(ctx, username.RootUserName(), "test", "tblB")
 	require.NoError(t, err)
-	startKeyTblA := keysutils.TestingSQLCodec.TablePrefix(uint32(tblAID))
-	startKeyTblB := keysutils.TestingSQLCodec.TablePrefix(uint32(tblBID))
+	startKeyTblA := keys.TODOSQLCodec.TablePrefix(uint32(tblAID))
+	startKeyTblB := keys.TODOSQLCodec.TablePrefix(uint32(tblBID))
 
 	// Split off ranges for tblA and tblB.
 	_, rDescA, err := firstSvr.SplitRange(startKeyTblA)
@@ -139,8 +139,8 @@ func TestDecommissionPreCheckEvaluation(t *testing.T) {
 	require.NoError(t, err)
 
 	// Ensure all nodes have the correct span configs for tblA and tblB.
-	waitForSpanConfig(t, tc, rDescA.StartKey, 500000000)
-	waitForSpanConfig(t, tc, rDescB.StartKey, 500000000)
+	waitForSpanConfig(t, tc, rDescA.StartKey, 500000)
+	waitForSpanConfig(t, tc, rDescB.StartKey, 500000)
 
 	// Transfer tblA to [west, central, east] and tblB to [east].
 	tc.AddVotersOrFatal(t, startKeyTblA, tc.Target(1), tc.Target(2), tc.Target(4))
@@ -229,19 +229,19 @@ func TestDecommissionPreCheckOddToEven(t *testing.T) {
 	runQueries(setupQueries...)
 	alterQueries := []string{
 		"ALTER TABLE test.tblA CONFIGURE ZONE USING num_replicas = 5, " +
-			"range_max_bytes = 500000000, range_min_bytes = 100",
+			"range_max_bytes = 500000, range_min_bytes = 100",
 	}
 	runQueries(alterQueries...)
 	tblAID, err := firstSvr.admin.queryTableID(ctx, username.RootUserName(), "test", "tblA")
 	require.NoError(t, err)
-	startKeyTblA := keysutils.TestingSQLCodec.TablePrefix(uint32(tblAID))
+	startKeyTblA := keys.TODOSQLCodec.TablePrefix(uint32(tblAID))
 
 	// Split off range for tblA.
 	_, rDescA, err := firstSvr.SplitRange(startKeyTblA)
 	require.NoError(t, err)
 
 	// Ensure all nodes have the correct span configs for tblA.
-	waitForSpanConfig(t, tc, rDescA.StartKey, 500000000)
+	waitForSpanConfig(t, tc, rDescA.StartKey, 500000)
 
 	// Transfer tblA to all nodes.
 	tc.AddVotersOrFatal(t, startKeyTblA, tc.Target(1), tc.Target(2), tc.Target(3), tc.Target(4))

@@ -764,13 +764,12 @@ func (r *Replica) AdminMerge(
 			Commit: true,
 			InternalCommitTrigger: &roachpb.InternalCommitTrigger{
 				MergeTrigger: &roachpb.MergeTrigger{
-					LeftDesc:                   updatedLeftDesc,
-					RightDesc:                  rightDesc,
-					RightMVCCStats:             rhsSnapshotRes.MVCCStats,
-					RightRangeIDLocalMVCCStats: rhsSnapshotRes.RangeIDLocalMVCCStats,
-					FreezeStart:                rhsSnapshotRes.FreezeStart,
-					RightClosedTimestamp:       rhsSnapshotRes.ClosedTimestamp,
-					RightReadSummary:           rhsSnapshotRes.ReadSummary,
+					LeftDesc:             updatedLeftDesc,
+					RightDesc:            rightDesc,
+					RightMVCCStats:       rhsSnapshotRes.MVCCStats,
+					FreezeStart:          rhsSnapshotRes.FreezeStart,
+					RightClosedTimestamp: rhsSnapshotRes.ClosedTimestamp,
+					RightReadSummary:     rhsSnapshotRes.ReadSummary,
 				},
 			},
 		})
@@ -1335,9 +1334,9 @@ func (r *Replica) maybeLeaveAtomicChangeReplicasAndRemoveLearners(
 	// periods of time on a single range without making progress, which can stall
 	// other operations that they are expected to perform (see
 	// https://github.com/cockroachdb/cockroach/issues/79249 for example).
-	if err := r.errOnOutstandingLearnerSnapshotInflight(); err != nil {
+	if r.hasOutstandingLearnerSnapshotInFlight() {
 		return nil /* desc */, 0, /* learnersRemoved */
-			errors.WithSecondaryError(errCannotRemoveLearnerWhileSnapshotInFlight, err)
+			errCannotRemoveLearnerWhileSnapshotInFlight
 	}
 
 	if fn := r.store.TestingKnobs().BeforeRemovingDemotedLearner; fn != nil {
@@ -1840,7 +1839,7 @@ func (r *Replica) lockLearnerSnapshot(
 	var cleanups []func()
 	for _, addition := range additions {
 		lockUUID := uuid.MakeV4()
-		_, cleanup := r.addSnapshotLogTruncationConstraint(ctx, lockUUID, true /* initial */, addition.StoreID)
+		_, cleanup := r.addSnapshotLogTruncationConstraint(ctx, lockUUID, addition.StoreID)
 		cleanups = append(cleanups, cleanup)
 	}
 	return func() {
@@ -2794,7 +2793,7 @@ func (r *Replica) sendSnapshotUsingDelegate(
 		senderQueuePriority = 0
 	}
 	snapUUID := uuid.MakeV4()
-	appliedIndex, cleanup := r.addSnapshotLogTruncationConstraint(ctx, snapUUID, snapType == kvserverpb.SnapshotRequest_INITIAL, recipient.StoreID)
+	appliedIndex, cleanup := r.addSnapshotLogTruncationConstraint(ctx, snapUUID, recipient.StoreID)
 	// The cleanup function needs to be called regardless of success or failure of
 	// sending to release the log truncation constraint.
 	defer cleanup()
@@ -2845,6 +2844,9 @@ func (r *Replica) sendSnapshotUsingDelegate(
 		if selfDelegate {
 			delegateRequest.QueueOnDelegateLen = -1
 		}
+		if !selfDelegate {
+			r.store.Metrics().DelegateSnapshotInProgress.Inc(1)
+		}
 
 		retErr = contextutil.RunWithTimeout(
 			ctx, "send-snapshot", sendSnapshotTimeout, func(ctx context.Context) error {
@@ -2852,6 +2854,10 @@ func (r *Replica) sendSnapshotUsingDelegate(
 				return r.store.cfg.Transport.DelegateSnapshot(ctx, delegateRequest)
 			},
 		)
+		if !selfDelegate {
+			r.store.Metrics().DelegateSnapshotInProgress.Dec(1)
+		}
+
 		// Return once we have success.
 		if retErr == nil {
 			if !selfDelegate {
@@ -2862,7 +2868,7 @@ func (r *Replica) sendSnapshotUsingDelegate(
 			if !selfDelegate {
 				r.store.Metrics().DelegateSnapshotFailures.Inc(1)
 			}
-			log.Warningf(ctx, "attempt %d: delegate snapshot %+v request failed %v", n+1, delegateRequest, retErr)
+			log.KvDistribution.Warningf(ctx, "attempt %d: delegate snapshot %+v request failed %v", n+1, delegateRequest, retErr)
 		}
 	}
 	return

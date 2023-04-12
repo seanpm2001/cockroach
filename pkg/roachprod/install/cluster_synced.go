@@ -182,7 +182,7 @@ func runWithMaybeRetry(
 }
 
 func scpWithRetry(l *logger.Logger, src, dest string) (*RunResultDetails, error) {
-	return runWithMaybeRetry(l, defaultSCPRetry, func() (*RunResultDetails, error) { return scp(src, dest) })
+	return runWithMaybeRetry(l, defaultSCPRetry, func() (*RunResultDetails, error) { return scp(l, src, dest) })
 }
 
 // Host returns the public IP of a node.
@@ -1106,8 +1106,7 @@ tar cf - .ssh/id_rsa .ssh/id_rsa.pub .ssh/authorized_keys
 			ip, err = c.GetInternalIP(l, ctx, node)
 			if err != nil {
 				res.Err = errors.Wrapf(err, "pgurls")
-				// By returning a nil error here, we'll retry the command.
-				return res, nil
+				return res, res.Err
 			}
 			time.Sleep(time.Second)
 		}
@@ -1542,7 +1541,7 @@ func (c *SyncedCluster) createNodeCertArguments(
 
 			res.Stdout, res.Err = c.GetInternalIP(l, ctx, node)
 			ips[i] = res.Stdout
-			return res, nil
+			return res, errors.Wrapf(res.Err, "IPs")
 		}, DefaultSSHRetryOpts); err != nil {
 			return nil, err
 		}
@@ -1966,6 +1965,7 @@ func (c *SyncedCluster) Logs(
 		var stderrBuf bytes.Buffer
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = &stderrBuf
+
 		if err := cmd.Run(); err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -2006,6 +2006,7 @@ func (c *SyncedCluster) Logs(
 		cmd.Stdout = out
 		var errBuf bytes.Buffer
 		cmd.Stderr = &errBuf
+
 		if err := cmd.Run(); err != nil && ctx.Err() == nil {
 			return errors.Wrapf(err, "failed to run cockroach debug merge-logs:\n%v", errBuf.String())
 		}
@@ -2292,9 +2293,9 @@ func (c *SyncedCluster) pghosts(
 		res := &RunResultDetails{Node: node}
 		res.Stdout, res.Err = c.GetInternalIP(l, ctx, node)
 		ips[i] = res.Stdout
-		return res, nil
+		return res, errors.Wrapf(res.Err, "pghosts")
 	}, DefaultSSHRetryOpts); err != nil {
-		return nil, errors.Wrapf(err, "pghosts")
+		return nil, err
 	}
 
 	m := make(map[Node]string, len(ips))
@@ -2380,7 +2381,7 @@ func (c *SyncedCluster) SSH(ctx context.Context, l *logger.Logger, sshArgs, args
 // scp return type conforms to what runWithMaybeRetry expects. A nil error
 // is always returned here since the only error that can happen is an scp error
 // which we do want to be able to retry.
-func scp(src, dest string) (*RunResultDetails, error) {
+func scp(l *logger.Logger, src, dest string) (*RunResultDetails, error) {
 	args := []string{
 		"scp", "-r", "-C",
 		"-o", "StrictHostKeyChecking=no",
@@ -2388,6 +2389,7 @@ func scp(src, dest string) (*RunResultDetails, error) {
 	args = append(args, sshAuthArgs()...)
 	args = append(args, src, dest)
 	cmd := exec.Command(args[0], args[1:]...)
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		err = errors.Wrapf(err, "~ %s\n%s", strings.Join(args, " "), out)
@@ -2410,9 +2412,6 @@ type ParallelResult struct {
 // cluster. If any of the commands fail, Parallel will log an error
 // and exit the program.
 //
-// A user may also pass in a RunRetryOpts to control how the function is retried
-// in the case of a failure.
-//
 // See ParallelE for more information.
 func (c *SyncedCluster) Parallel(
 	l *logger.Logger,
@@ -2425,7 +2424,7 @@ func (c *SyncedCluster) Parallel(
 	if err != nil {
 		sort.Slice(failed, func(i, j int) bool { return failed[i].Index < failed[j].Index })
 		for _, f := range failed {
-			fmt.Fprintf(l.Stderr, "%d: %+v: %s\n", f.Index, f.Err, f.Out)
+			l.Errorf("%d: %+v: %s", f.Index, f.Err, f.Out)
 		}
 		return err
 	}
@@ -2441,12 +2440,7 @@ func (c *SyncedCluster) Parallel(
 // 0, then it defaults to `count`.
 //
 // The function returns a pointer to RunResultDetails as we may enrich
-// the result with retry information (attempt number, wrapper error).
-//
-// RunRetryOpts controls the retry behavior in the case that
-// the function fails, but returns a nil error. A non-nil error returned by the
-// function denotes a roachprod error and will not be retried regardless of the
-// retry options.
+// the result with retry information (attempt number, wrapper error)
 //
 // If err is non-nil, the slice of ParallelResults will contain the
 // results from any of the failed invocations.

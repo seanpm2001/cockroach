@@ -18,7 +18,6 @@ import (
 	"io"
 	"math"
 	"math/rand"
-	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -41,7 +40,6 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -1058,6 +1056,12 @@ func TestIngestDelayLimit(t *testing.T) {
 	}
 }
 
+type stringSorter []string
+
+func (s stringSorter) Len() int               { return len(s) }
+func (s stringSorter) Swap(i int, j int)      { s[i], s[j] = s[j], s[i] }
+func (s stringSorter) Less(i int, j int) bool { return strings.Compare(s[i], s[j]) < 0 }
+
 func TestEngineFS(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -1110,7 +1114,7 @@ func TestEngineFS(t *testing.T) {
 		"9h: delete /dir1",
 	}
 
-	var f vfs.File
+	var f fs.File
 	for _, tc := range testCases {
 		s := strings.Split(tc, " ")[1:]
 
@@ -1128,14 +1132,14 @@ func TestEngineFS(t *testing.T) {
 		}
 
 		var (
-			g   vfs.File
+			g   fs.File
 			err error
 		)
 		switch s[0] {
 		case "create":
 			g, err = e.Create(s[1])
 		case "create-with-sync":
-			g, err = fs.CreateWithSync(e, s[1], 1)
+			g, err = e.CreateWithSync(s[1], 1)
 		case "link":
 			err = e.Link(s[1], s[2])
 		case "open":
@@ -1147,13 +1151,13 @@ func TestEngineFS(t *testing.T) {
 		case "rename":
 			err = e.Rename(s[1], s[2])
 		case "create-dir":
-			err = e.MkdirAll(s[1], os.ModePerm)
+			err = e.MkdirAll(s[1])
 		case "list-dir":
 			result, err := e.List(s[1])
 			if err != nil {
 				break
 			}
-			sort.Strings(result)
+			sort.Sort(stringSorter(result))
 			got := strings.Join(result, ",")
 			want := s[3]
 			if got != want {
@@ -1300,7 +1304,6 @@ func TestFS(t *testing.T) {
 				t.Helper()
 
 				got, err := fs.List(dir)
-				sort.Strings(got)
 				require.NoError(t, err)
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("fs.List(%q) = %#v, want %#v", dir, got, want)
@@ -1308,7 +1311,7 @@ func TestFS(t *testing.T) {
 			}
 
 			// Create a/ and assert that it's empty.
-			require.NoError(t, fs.MkdirAll(path("a"), os.ModePerm))
+			require.NoError(t, fs.MkdirAll(path("a")))
 			expectLS(path("a"), []string{})
 			if _, err := fs.Stat(path("a/b/c")); !oserror.IsNotExist(err) {
 				t.Fatal(`fs.Stat("a/b/c") should not exist`)
@@ -1316,8 +1319,8 @@ func TestFS(t *testing.T) {
 
 			// Create a/b/ and a/b/c/ in a single MkdirAll call.
 			// Then ensure that a duplicate call returns a nil error.
-			require.NoError(t, fs.MkdirAll(path("a/b/c"), os.ModePerm))
-			require.NoError(t, fs.MkdirAll(path("a/b/c"), os.ModePerm))
+			require.NoError(t, fs.MkdirAll(path("a/b/c")))
+			require.NoError(t, fs.MkdirAll(path("a/b/c")))
 			expectLS(path("a"), []string{"b"})
 			expectLS(path("a/b"), []string{"c"})
 			expectLS(path("a/b/c"), []string{})

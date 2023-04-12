@@ -22,7 +22,7 @@ export function filteredStatementsData(
 ): AggregateStatistics[] {
   const timeValue = getTimeValueInSeconds(filters);
   const sqlTypes =
-    filters.sqlType.length > 0
+    filters.sqlType?.length > 0
       ? filters.sqlType.split(",").map(function (sqlType: string) {
           // Adding "Type" to match the value on the Statement
           // Possible values: TypeDDL, TypeDML, TypeDCL and TypeTCL
@@ -30,12 +30,12 @@ export function filteredStatementsData(
         })
       : [];
   const databases =
-    filters.database.length > 0 ? filters.database.split(",") : [];
+    filters.database?.length > 0 ? filters.database.split(",") : [];
   if (databases.includes(unset)) {
     databases.push("");
   }
-  const regions = filters.regions.length > 0 ? filters.regions.split(",") : [];
-  const nodes = filters.nodes.length > 0 ? filters.nodes.split(",") : [];
+  const regions = filters.regions?.length > 0 ? filters.regions.split(",") : [];
+  const nodes = filters.nodes?.length > 0 ? filters.nodes.split(",") : [];
 
   // Return statements filtered by the values selected on the filter and
   // the search text. A statement must match all selected filters to be
@@ -43,10 +43,18 @@ export function filteredStatementsData(
   // Current filters: search text, database, fullScan, service latency,
   // SQL Type, nodes and regions.
   return statements
-    .filter(
-      statement =>
-        databases.length == 0 || databases.includes(statement.database),
-    )
+    .filter(statement => {
+      try {
+        // Case where the database is returned as an array in a string form.
+        const dbList = JSON.parse(statement.database);
+        return (
+          databases.length === 0 || databases.some(d => dbList.includes(d))
+        );
+      } catch (e) {
+        // Case where the database is a single value as a string.
+        return databases.length === 0 || databases.includes(statement.database);
+      }
+    })
     .filter(statement => (filters.fullScan ? statement.fullScan : true))
     .filter(
       statement =>

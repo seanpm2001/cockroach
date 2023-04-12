@@ -48,6 +48,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -1294,6 +1295,26 @@ func (t *logicTest) newTestServerCluster(bootstrapBinaryPath string, upgradeBina
 func (t *logicTest) newCluster(
 	serverArgs TestServerArgs, clusterOpts []clusterOpt, knobOpts []knobOpt, toa tenantOverrideArgs,
 ) {
+	makeClusterSettings := func(forSystemTenant bool) *cluster.Settings {
+		var st *cluster.Settings
+		if forSystemTenant {
+			// System tenants use the constructor that doesn't initialize the
+			// cluster version (see makeTestConfigFromParams). This is needed
+			// for local-mixed-22.2-23.1 config.
+			st = cluster.MakeClusterSettings()
+		} else {
+			// Regular tenants use the constructor that initializes the cluster
+			// version (see TestServer.StartTenant).
+			st = cluster.MakeTestingClusterSettings()
+		}
+		// Disable stats collection on system tables before the cluster is
+		// started, otherwise there is a race condition where stats may be
+		// collected before we can disable them with `SET CLUSTER SETTING`. We
+		// disable stats collection on system tables in order to have
+		// deterministic tests.
+		stats.AutomaticStatisticsOnSystemTables.Override(context.Background(), &st.SV, false)
+		return st
+	}
 	var corpusCollectionCallback func(p scplan.Plan, stageIdx int) error
 	if serverArgs.DeclarativeCorpusCollection && t.declarativeCorpusCollector != nil {
 		corpusCollectionCallback = t.declarativeCorpusCollector.GetBeforeStage(t.rootT.Name(), t.t())
@@ -1317,10 +1338,7 @@ func (t *logicTest) newCluster(
 
 	params := base.TestClusterArgs{
 		ServerArgs: base.TestServerArgs{
-			SQLMemoryPoolSize: serverArgs.MaxSQLMemoryLimit,
-			TempStorageConfig: base.DefaultTestTempStorageConfigWithSize(
-				cluster.MakeTestingClusterSettings(), tempStorageDiskLimit,
-			),
+			SQLMemoryPoolSize:        serverArgs.MaxSQLMemoryLimit,
 			DisableDefaultTestTenant: t.cfg.UseTenant || t.cfg.DisableDefaultTestTenant,
 			Knobs: base.TestingKnobs{
 				Store: &kvserver.StoreTestingKnobs{
@@ -1408,6 +1426,10 @@ func (t *logicTest) newCluster(
 		} else {
 			require.Lenf(t.rootT, cfg.Localities, 0, "node %d does not have a locality set", i+1)
 		}
+		nodeParams.Settings = makeClusterSettings(true /* forSystemTenant */)
+		nodeParams.TempStorageConfig = base.DefaultTestTempStorageConfigWithSize(
+			nodeParams.Settings, tempStorageDiskLimit,
+		)
 		paramsPerNode[i] = nodeParams
 	}
 	params.ServerArgsPerNode = paramsPerNode
@@ -1419,14 +1441,6 @@ func (t *logicTest) newCluster(
 	stats.DefaultAsOfTime = 10 * time.Millisecond
 	stats.DefaultRefreshInterval = time.Millisecond
 
-	// Disable stats collection on system tables before the cluster is started,
-	// otherwise there is a race condition where stats may be collected before we
-	// can disable them with `SET CLUSTER SETTING`. We disable stats collection on
-	// system tables in order to have deterministic tests.
-	stats.AutomaticStatisticsOnSystemTables.Override(
-		context.Background(), &params.ServerArgs.TempStorageConfig.Settings.SV, false,
-	)
-
 	t.cluster = serverutils.StartNewTestCluster(t.rootT, cfg.NumNodes, params)
 	if cfg.UseFakeSpanResolver {
 		fakeResolver := physicalplanutils.FakeResolverForTestCluster(t.cluster)
@@ -1437,8 +1451,11 @@ func (t *logicTest) newCluster(
 	if cfg.UseTenant {
 		t.tenantAddrs = make([]string, cfg.NumNodes)
 		for i := 0; i < cfg.NumNodes; i++ {
+			settings := makeClusterSettings(false /* forSystemTenant */)
+			tempStorageConfig := base.DefaultTestTempStorageConfigWithSize(settings, tempStorageDiskLimit)
 			tenantArgs := base.TestTenantArgs{
 				TenantID: serverutils.TestTenantID(),
+				Settings: settings,
 				TestingKnobs: base.TestingKnobs{
 					SQLExecutor: &sql.ExecutorTestingKnobs{
 						DeterministicExplain:            true,
@@ -1450,7 +1467,7 @@ func (t *logicTest) newCluster(
 					RangeFeed: paramsPerNode[i].Knobs.RangeFeed,
 				},
 				MemoryPoolSize:    params.ServerArgs.SQLMemoryPoolSize,
-				TempStorageConfig: &params.ServerArgs.TempStorageConfig,
+				TempStorageConfig: &tempStorageConfig,
 				Locality:          paramsPerNode[i].Locality,
 				TracingDefault:    params.ServerArgs.TracingDefault,
 				// Give every tenant its own ExternalIO directory.
@@ -1520,19 +1537,32 @@ func (t *logicTest) newCluster(
 			}
 		}
 
-		tenantID := serverutils.TestTenantID().ToUint64()
+		tenantID := serverutils.TestTenantID()
 		for name, value := range clusterSettings {
 			query := fmt.Sprintf("ALTER TENANT [$1] SET CLUSTER SETTING %s = $2", name)
-			if _, err := conn.Exec(query, tenantID, value); err != nil {
+			if _, err := conn.Exec(query, tenantID.ToUint64(), value); err != nil {
 				t.Fatal(err)
 			}
 		}
 
-		for name, value := range toa.capabilities {
+		capabilities := toa.capabilities
+		for name, value := range capabilities {
 			query := fmt.Sprintf("ALTER TENANT [$1] GRANT CAPABILITY %s = $2", name)
-			if _, err := conn.Exec(query, tenantID, value); err != nil {
+			if _, err := conn.Exec(query, tenantID.ToUint64(), value); err != nil {
 				t.Fatal(err)
 			}
+		}
+		numCapabilities := len(capabilities)
+		if numCapabilities > 0 {
+			capabilityMap := make(map[tenantcapabilities.ID]string, numCapabilities)
+			for k, v := range capabilities {
+				capability, ok := tenantcapabilities.FromName(k)
+				if !ok {
+					t.Fatalf("cannot get capability from name %q", k)
+				}
+				capabilityMap[capability.ID()] = v
+			}
+			t.cluster.WaitForTenantCapabilities(t.t(), tenantID, capabilityMap)
 		}
 	}
 
@@ -3028,8 +3058,11 @@ func (t *logicTest) processSubtest(
 				}
 				delete(m, nodeIdx)
 			}
-			db := t.getOrOpenClient(t.user, nodeIdx)
-			t.db = db
+			// If we upgraded the node we are currently on, we need to open a new
+			// connection since the previous one might now be invalid.
+			if t.nodeIdx == nodeIdx {
+				t.setUser(t.user, nodeIdx)
+			}
 		default:
 			return errors.Errorf("%s:%d: unknown command: %s",
 				path, s.Line+subtest.lineLineIndexIntoFile, cmd,

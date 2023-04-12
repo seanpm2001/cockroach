@@ -34,6 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
+	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -852,14 +853,6 @@ func (tc *TestCluster) WaitForVoters(
 	return tc.waitForNewReplicas(startKey, true /* waitForVoter */, targets...)
 }
 
-// WaitForVotersOrFatal is the same as WaitForVoters but it will Fatal the test
-// on error.
-func (tc *TestCluster) WaitForVotersOrFatal(
-	t testing.TB, startKey roachpb.Key, targets ...roachpb.ReplicationTarget,
-) {
-	require.NoError(t, tc.WaitForVoters(startKey, targets...))
-}
-
 // waitForNewReplicas waits for each of the targets to have a fully initialized
 // replica of the range indicated by startKey.
 //
@@ -1422,6 +1415,36 @@ func (tc *TestCluster) WaitForFullReplication() error {
 	return nil
 }
 
+// WaitFor5NodeReplication ensures that zone configs are applied and
+// up-replication is performed with new zone configs. This is the case for 5+
+// node clusters.
+// TODO: This code should be moved into WaitForFullReplication once #99812 is
+// fixed so that all test would benefit from this check implicitly.
+// This bug currently prevents LastUpdated to tick in metamorphic tests
+// with kv.expiration_leases_only.enabled = true.
+func (tc *TestCluster) WaitFor5NodeReplication() error {
+	if len(tc.Servers) > 4 && tc.ReplicationMode() == base.ReplicationAuto {
+		// We need to wait for zone config propagations before we could check
+		// conformance since zone configs are propagated synchronously.
+		// Generous timeout is added to allow rangefeeds to catch up. On startup
+		// they could get delayed making test to fail.
+		now := tc.Server(0).Clock().Now()
+		for _, s := range tc.Servers {
+			scs := s.SpanConfigKVSubscriber().(spanconfig.KVSubscriber)
+			if err := testutils.SucceedsSoonError(func() error {
+				if scs.LastUpdated().Less(now) {
+					return errors.New("zone configs not propagated")
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return tc.WaitForFullReplication()
+	}
+	return nil
+}
+
 // WaitForNodeStatuses waits until a NodeStatus is persisted for every node and
 // store in the cluster.
 func (tc *TestCluster) WaitForNodeStatuses(t testing.TB) {
@@ -1803,7 +1826,7 @@ func (tc *TestCluster) SplitTable(
 
 // WaitForTenantCapabilities implements TestClusterInterface.
 func (tc *TestCluster) WaitForTenantCapabilities(
-	t *testing.T, tenID roachpb.TenantID, targetCaps map[tenantcapabilities.CapabilityID]string,
+	t *testing.T, tenID roachpb.TenantID, targetCaps map[tenantcapabilities.ID]string,
 ) {
 	for i, ts := range tc.Servers {
 		testutils.SucceedsSoon(t, func() error {
@@ -1812,7 +1835,7 @@ func (tc *TestCluster) WaitForTenantCapabilities(
 			}
 
 			if len(targetCaps) > 0 {
-				missingCapabilityError := func(capID tenantcapabilities.CapabilityID) error {
+				missingCapabilityError := func(capID tenantcapabilities.ID) error {
 					return errors.Newf("server=%d tenant %s cap %q not at expected value", i, tenID, capID)
 				}
 				capabilities, found := ts.Server.TenantCapabilitiesReader().GetCapabilities(tenID)
@@ -1821,7 +1844,7 @@ func (tc *TestCluster) WaitForTenantCapabilities(
 				}
 
 				for capID, expectedValue := range targetCaps {
-					curVal := capabilities.Cap(capID).Get().String()
+					curVal := tenantcapabilities.MustGetValueByID(capabilities, capID).String()
 					if curVal != expectedValue {
 						return missingCapabilityError(capID)
 					}

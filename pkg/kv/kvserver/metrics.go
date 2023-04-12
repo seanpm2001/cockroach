@@ -416,7 +416,7 @@ var (
 		Unit:        metric.Unit_COUNT,
 	}
 
-	// RocksDB/Pebble metrics.
+	// Pebble metrics.
 	metaRdbBlockCacheHits = metric.Metadata{
 		Name:        "rocksdb.block.cache.hits",
 		Help:        "Count of block cache hits",
@@ -616,6 +616,88 @@ Raft applied index at which this checkpoint was taken.`,
 		Unit:        metric.Unit_COUNT,
 	}
 
+	metaBlockBytes = metric.Metadata{
+		Name:        "storage.iterator.block-load.bytes",
+		Help:        "Bytes loaded by storage engine iterators (possibly cached). See storage.AggregatedIteratorStats for details.",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaBlockBytesInCache = metric.Metadata{
+		Name:        "storage.iterator.block-load.cached-bytes",
+		Help:        "Bytes loaded by storage engine iterators from the block cache. See storage.AggregatedIteratorStats for details.",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaBlockReadDuration = metric.Metadata{
+		Name:        "storage.iterator.block-load.read-duration",
+		Help:        "Cumulative time storage engine iterators spent loading blocks from durable storage. See storage.AggregatedIteratorStats for details.",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaIterExternalSeeks = metric.Metadata{
+		Name:        "storage.iterator.external.seeks",
+		Help:        "Cumulative count of seeks performed on storage engine iterators. See storage.AggregatedIteratorStats for details.",
+		Measurement: "Iterator Ops",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaIterExternalSteps = metric.Metadata{
+		Name:        "storage.iterator.external.steps",
+		Help:        "Cumulative count of steps performed on storage engine iterators. See storage.AggregatedIteratorStats for details.",
+		Measurement: "Iterator Ops",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaIterInternalSeeks = metric.Metadata{
+		Name: "storage.iterator.internal.seeks",
+		Help: `Cumulative count of seeks performed internally within storage engine iterators.
+
+A value high relative to 'storage.iterator.external.seeks'
+is a good indication that there's an accumulation of garbage
+internally within the storage engine.
+
+See storage.AggregatedIteratorStats for details.`,
+		Measurement: "Iterator Ops",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaIterInternalSteps = metric.Metadata{
+		Name: "storage.iterator.internal.steps",
+		Help: `Cumulative count of steps performed internally within storage engine iterators.
+
+A value high relative to 'storage.iterator.external.steps'
+is a good indication that there's an accumulation of garbage
+internally within the storage engine.
+
+See storage.AggregatedIteratorStats for more details.`,
+		Measurement: "Iterator Ops",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaStorageCompactionsKeysPinnedCount = metric.Metadata{
+		Name: "storage.compactions.keys.pinned.count",
+		Help: `Cumulative count of storage engine KVs written to sstables during flushes and compactions due to open LSM snapshots.
+
+Various subsystems of CockroachDB take LSM snapshots to maintain a consistent view
+of the database over an extended duration. In order to maintain the consistent view,
+flushes and compactions within the storage engine must preserve keys that otherwise
+would have been dropped. This increases write amplification, and introduces keys
+that must be skipped during iteration. This metric records the cumulative count of
+KVs preserved during flushes and compactions over the lifetime of the process.
+`,
+		Measurement: "Keys",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaStorageCompactionsKeysPinnedBytes = metric.Metadata{
+		Name: "storage.compactions.keys.pinned.bytes",
+		Help: `Cumulative size of storage engine KVs written to sstables during flushes and compactions due to open LSM snapshots.
+
+Various subsystems of CockroachDB take LSM snapshots to maintain a consistent view
+of the database over an extended duration. In order to maintain the consistent view,
+flushes and compactions within the storage engine must preserve keys that otherwise
+would have been dropped. This increases write amplification, and introduces keys
+that must be skipped during iteration. This metric records the cumulative number of
+bytes preserved during flushes and compactions over the lifetime of the process.
+`,
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
 	metaSharedStorageBytesWritten = metric.Metadata{
 		Name:        "storage.shared-storage.write",
 		Help:        "Bytes written to external storage",
@@ -825,7 +907,7 @@ evaluating the network savings of not sending cross region traffic.
 		Unit:        metric.Unit_BYTES,
 	}
 	metaDelegateSnapshotSuccesses = metric.Metadata{
-		Name: "range.snapshot.delegate.successes",
+		Name: "range.snapshots.delegate.successes",
 		Help: `Number of snapshots that were delegated to a different node and
 resulted in success on that delegate. This does not count self delegated snapshots.
 `,
@@ -833,12 +915,18 @@ resulted in success on that delegate. This does not count self delegated snapsho
 		Unit:        metric.Unit_COUNT,
 	}
 	metaDelegateSnapshotFailures = metric.Metadata{
-		Name: "range.snapshot.delegate.failures",
+		Name: "range.snapshots.delegate.failures",
 		Help: `Number of snapshots that were delegated to a different node and
 resulted in failure on that delegate. There are numerous reasons a failure can
 occur on a delegate such as timeout, the delegate Raft log being too far behind
 or the delegate being too busy to send.
 `,
+		Measurement: "Snapshots",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaDelegateSnapshotInProgress = metric.Metadata{
+		Name:        "range.snapshots.delegate.in-progress",
+		Help:        `Number of delegated snapshots that are currently in-flight.`,
 		Measurement: "Snapshots",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -1843,42 +1931,59 @@ type StoreMetrics struct {
 	// before pebble, and this name is kept for backwards compatibility despite
 	// the backing metrics now originating from pebble.
 	//
-	// All of these are cumulative values. They are maintained by pebble and
+	// All of these are cumulative values. Most are maintained by pebble and
 	// so we have to expose them as gauges (lest we start tracking deltas from
 	// the respective last stats we got from pebble).
-	RdbBlockCacheHits           *metric.Gauge
-	RdbBlockCacheMisses         *metric.Gauge
-	RdbBlockCacheUsage          *metric.Gauge
-	RdbBlockCachePinnedUsage    *metric.Gauge
-	RdbBloomFilterPrefixChecked *metric.Gauge
-	RdbBloomFilterPrefixUseful  *metric.Gauge
-	RdbMemtableTotalSize        *metric.Gauge
-	RdbFlushes                  *metric.Gauge
-	RdbFlushedBytes             *metric.Gauge
-	RdbCompactions              *metric.Gauge
-	RdbIngestedBytes            *metric.Gauge
-	RdbCompactedBytesRead       *metric.Gauge
-	RdbCompactedBytesWritten    *metric.Gauge
-	RdbTableReadersMemEstimate  *metric.Gauge
-	RdbReadAmplification        *metric.Gauge
-	RdbNumSSTables              *metric.Gauge
-	RdbPendingCompaction        *metric.Gauge
-	RdbMarkedForCompactionFiles *metric.Gauge
-	RdbKeysRangeKeySets         *metric.Gauge
-	RdbKeysTombstones           *metric.Gauge
-	RdbL0BytesFlushed           *metric.Gauge
-	RdbL0Sublevels              *metric.Gauge
-	RdbL0NumFiles               *metric.Gauge
-	RdbBytesIngested            [7]*metric.Gauge        // idx = level
-	RdbLevelSize                [7]*metric.Gauge        // idx = level
-	RdbLevelScore               [7]*metric.GaugeFloat64 // idx = level
-	RdbWriteStalls              *metric.Gauge
-	RdbWriteStallNanos          *metric.Gauge
-	SharedStorageBytesRead      *metric.Gauge
-	SharedStorageBytesWritten   *metric.Gauge
-	FlushableIngestCount        *metric.Gauge
-	FlushableIngestTableCount   *metric.Gauge
-	FlushableIngestTableSize    *metric.Gauge
+	//
+	// There's a bit of a semantic mismatch here because the mechanism of
+	// updating these metrics is a gauge (eg, we're reading the current value,
+	// not incrementing) but semantically some of them are monotonically
+	// increasing counters.
+	//
+	// TODO(jackson): Reconcile this mismatch so that metrics that are
+	// semantically counters are exported as such to Prometheus. See #99922.
+	RdbBlockCacheHits             *metric.Gauge
+	RdbBlockCacheMisses           *metric.Gauge
+	RdbBlockCacheUsage            *metric.Gauge
+	RdbBlockCachePinnedUsage      *metric.Gauge
+	RdbBloomFilterPrefixChecked   *metric.Gauge
+	RdbBloomFilterPrefixUseful    *metric.Gauge
+	RdbMemtableTotalSize          *metric.Gauge
+	RdbFlushes                    *metric.Gauge
+	RdbFlushedBytes               *metric.Gauge
+	RdbCompactions                *metric.Gauge
+	RdbIngestedBytes              *metric.Gauge
+	RdbCompactedBytesRead         *metric.Gauge
+	RdbCompactedBytesWritten      *metric.Gauge
+	RdbTableReadersMemEstimate    *metric.Gauge
+	RdbReadAmplification          *metric.Gauge
+	RdbNumSSTables                *metric.Gauge
+	RdbPendingCompaction          *metric.Gauge
+	RdbMarkedForCompactionFiles   *metric.Gauge
+	RdbKeysRangeKeySets           *metric.Gauge
+	RdbKeysTombstones             *metric.Gauge
+	RdbL0BytesFlushed             *metric.Gauge
+	RdbL0Sublevels                *metric.Gauge
+	RdbL0NumFiles                 *metric.Gauge
+	RdbBytesIngested              [7]*metric.Gauge        // idx = level
+	RdbLevelSize                  [7]*metric.Gauge        // idx = level
+	RdbLevelScore                 [7]*metric.GaugeFloat64 // idx = level
+	RdbWriteStalls                *metric.Gauge
+	RdbWriteStallNanos            *metric.Gauge
+	SharedStorageBytesRead        *metric.Gauge
+	SharedStorageBytesWritten     *metric.Gauge
+	StorageCompactionsPinnedKeys  *metric.Gauge
+	StorageCompactionsPinnedBytes *metric.Gauge
+	IterBlockBytes                *metric.Gauge
+	IterBlockBytesInCache         *metric.Gauge
+	IterBlockReadDuration         *metric.Gauge
+	IterExternalSeeks             *metric.Gauge
+	IterExternalSteps             *metric.Gauge
+	IterInternalSeeks             *metric.Gauge
+	IterInternalSteps             *metric.Gauge
+	FlushableIngestCount          *metric.Gauge
+	FlushableIngestTableCount     *metric.Gauge
+	FlushableIngestTableSize      *metric.Gauge
 
 	RdbCheckpoints *metric.Gauge
 
@@ -1922,9 +2027,10 @@ type StoreMetrics struct {
 	RangeSnapshotRecvTotalInProgress *metric.Gauge
 
 	// Delegate snapshot metrics. These don't count self-delegated snapshots.
-	DelegateSnapshotSendBytes *metric.Counter
-	DelegateSnapshotSuccesses *metric.Counter
-	DelegateSnapshotFailures  *metric.Counter
+	DelegateSnapshotSendBytes  *metric.Counter
+	DelegateSnapshotSuccesses  *metric.Counter
+	DelegateSnapshotFailures   *metric.Counter
+	DelegateSnapshotInProgress *metric.Gauge
 
 	// Raft processing metrics.
 	RaftTicks                 *metric.Counter
@@ -2392,40 +2498,58 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		ReadWithinUncertaintyIntervalErrorServerSideRetrySuccess: metric.NewCounter(metaReadWithinUncertaintyIntervalErrorServerSideRetrySuccess),
 		ReadWithinUncertaintyIntervalErrorServerSideRetryFailure: metric.NewCounter(metaReadWithinUncertaintyIntervalErrorServerSideRetryFailure),
 
-		// RocksDB/Pebble metrics.
-		RdbBlockCacheHits:           metric.NewGauge(metaRdbBlockCacheHits),
-		RdbBlockCacheMisses:         metric.NewGauge(metaRdbBlockCacheMisses),
-		RdbBlockCacheUsage:          metric.NewGauge(metaRdbBlockCacheUsage),
-		RdbBlockCachePinnedUsage:    metric.NewGauge(metaRdbBlockCachePinnedUsage),
-		RdbBloomFilterPrefixChecked: metric.NewGauge(metaRdbBloomFilterPrefixChecked),
-		RdbBloomFilterPrefixUseful:  metric.NewGauge(metaRdbBloomFilterPrefixUseful),
-		RdbMemtableTotalSize:        metric.NewGauge(metaRdbMemtableTotalSize),
-		RdbFlushes:                  metric.NewGauge(metaRdbFlushes),
-		RdbFlushedBytes:             metric.NewGauge(metaRdbFlushedBytes),
-		RdbCompactions:              metric.NewGauge(metaRdbCompactions),
-		RdbIngestedBytes:            metric.NewGauge(metaRdbIngestedBytes),
-		RdbCompactedBytesRead:       metric.NewGauge(metaRdbCompactedBytesRead),
-		RdbCompactedBytesWritten:    metric.NewGauge(metaRdbCompactedBytesWritten),
-		RdbTableReadersMemEstimate:  metric.NewGauge(metaRdbTableReadersMemEstimate),
-		RdbReadAmplification:        metric.NewGauge(metaRdbReadAmplification),
-		RdbNumSSTables:              metric.NewGauge(metaRdbNumSSTables),
-		RdbPendingCompaction:        metric.NewGauge(metaRdbPendingCompaction),
-		RdbMarkedForCompactionFiles: metric.NewGauge(metaRdbMarkedForCompactionFiles),
-		RdbKeysRangeKeySets:         metric.NewGauge(metaRdbKeysRangeKeySets),
-		RdbKeysTombstones:           metric.NewGauge(metaRdbKeysTombstones),
-		RdbL0BytesFlushed:           metric.NewGauge(metaRdbL0BytesFlushed),
-		RdbL0Sublevels:              metric.NewGauge(metaRdbL0Sublevels),
-		RdbL0NumFiles:               metric.NewGauge(metaRdbL0NumFiles),
-		RdbBytesIngested:            rdbBytesIngested,
-		RdbLevelSize:                rdbLevelSize,
-		RdbLevelScore:               rdbLevelScore,
-		RdbWriteStalls:              metric.NewGauge(metaRdbWriteStalls),
-		RdbWriteStallNanos:          metric.NewGauge(metaRdbWriteStallNanos),
-		SharedStorageBytesRead:      metric.NewGauge(metaSharedStorageBytesRead),
-		SharedStorageBytesWritten:   metric.NewGauge(metaSharedStorageBytesWritten),
-		FlushableIngestCount:        metric.NewGauge(metaFlushableIngestCount),
-		FlushableIngestTableCount:   metric.NewGauge(metaFlushableIngestTableCount),
-		FlushableIngestTableSize:    metric.NewGauge(metaFlushableIngestTableBytes),
+		// Pebble metrics.
+		//
+		// These are all gauges today because almost all of them are cumulative
+		// metrics recorded within Pebble. Internally within Pebble some of
+		// these are monotonically increasing counters. There's a bit of a
+		// semantic mismatch here because the mechanism of updating the metric
+		// is a gauge (eg, we're reading the current value, not incrementing)
+		// but the meaning of the metric itself is a counter.
+		// TODO(jackson): Reconcile this mismatch so that metrics that are
+		// semantically counters are exported as such to Prometheus. See #99922.
+		RdbBlockCacheHits:             metric.NewGauge(metaRdbBlockCacheHits),
+		RdbBlockCacheMisses:           metric.NewGauge(metaRdbBlockCacheMisses),
+		RdbBlockCacheUsage:            metric.NewGauge(metaRdbBlockCacheUsage),
+		RdbBlockCachePinnedUsage:      metric.NewGauge(metaRdbBlockCachePinnedUsage),
+		RdbBloomFilterPrefixChecked:   metric.NewGauge(metaRdbBloomFilterPrefixChecked),
+		RdbBloomFilterPrefixUseful:    metric.NewGauge(metaRdbBloomFilterPrefixUseful),
+		RdbMemtableTotalSize:          metric.NewGauge(metaRdbMemtableTotalSize),
+		RdbFlushes:                    metric.NewGauge(metaRdbFlushes),
+		RdbFlushedBytes:               metric.NewGauge(metaRdbFlushedBytes),
+		RdbCompactions:                metric.NewGauge(metaRdbCompactions),
+		RdbIngestedBytes:              metric.NewGauge(metaRdbIngestedBytes),
+		RdbCompactedBytesRead:         metric.NewGauge(metaRdbCompactedBytesRead),
+		RdbCompactedBytesWritten:      metric.NewGauge(metaRdbCompactedBytesWritten),
+		RdbTableReadersMemEstimate:    metric.NewGauge(metaRdbTableReadersMemEstimate),
+		RdbReadAmplification:          metric.NewGauge(metaRdbReadAmplification),
+		RdbNumSSTables:                metric.NewGauge(metaRdbNumSSTables),
+		RdbPendingCompaction:          metric.NewGauge(metaRdbPendingCompaction),
+		RdbMarkedForCompactionFiles:   metric.NewGauge(metaRdbMarkedForCompactionFiles),
+		RdbKeysRangeKeySets:           metric.NewGauge(metaRdbKeysRangeKeySets),
+		RdbKeysTombstones:             metric.NewGauge(metaRdbKeysTombstones),
+		RdbL0BytesFlushed:             metric.NewGauge(metaRdbL0BytesFlushed),
+		RdbL0Sublevels:                metric.NewGauge(metaRdbL0Sublevels),
+		RdbL0NumFiles:                 metric.NewGauge(metaRdbL0NumFiles),
+		RdbBytesIngested:              rdbBytesIngested,
+		RdbLevelSize:                  rdbLevelSize,
+		RdbLevelScore:                 rdbLevelScore,
+		RdbWriteStalls:                metric.NewGauge(metaRdbWriteStalls),
+		RdbWriteStallNanos:            metric.NewGauge(metaRdbWriteStallNanos),
+		IterBlockBytes:                metric.NewGauge(metaBlockBytes),
+		IterBlockBytesInCache:         metric.NewGauge(metaBlockBytesInCache),
+		IterBlockReadDuration:         metric.NewGauge(metaBlockReadDuration),
+		IterExternalSeeks:             metric.NewGauge(metaIterExternalSeeks),
+		IterExternalSteps:             metric.NewGauge(metaIterExternalSteps),
+		IterInternalSeeks:             metric.NewGauge(metaIterInternalSeeks),
+		IterInternalSteps:             metric.NewGauge(metaIterInternalSteps),
+		SharedStorageBytesRead:        metric.NewGauge(metaSharedStorageBytesRead),
+		SharedStorageBytesWritten:     metric.NewGauge(metaSharedStorageBytesWritten),
+		StorageCompactionsPinnedKeys:  metric.NewGauge(metaStorageCompactionsKeysPinnedCount),
+		StorageCompactionsPinnedBytes: metric.NewGauge(metaStorageCompactionsKeysPinnedBytes),
+		FlushableIngestCount:          metric.NewGauge(metaFlushableIngestCount),
+		FlushableIngestTableCount:     metric.NewGauge(metaFlushableIngestTableCount),
+		FlushableIngestTableSize:      metric.NewGauge(metaFlushableIngestTableBytes),
 
 		RdbCheckpoints: metric.NewGauge(metaRdbCheckpoints),
 
@@ -2461,6 +2585,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		DelegateSnapshotSendBytes:                    metric.NewCounter(metaDelegateSnapshotSendBytes),
 		DelegateSnapshotSuccesses:                    metric.NewCounter(metaDelegateSnapshotSuccesses),
 		DelegateSnapshotFailures:                     metric.NewCounter(metaDelegateSnapshotFailures),
+		DelegateSnapshotInProgress:                   metric.NewGauge(metaDelegateSnapshotInProgress),
 
 		// Raft processing metrics.
 		RaftTicks: metric.NewCounter(metaRaftTicks),
@@ -2753,6 +2878,15 @@ func (sm *StoreMetrics) updateEngineMetrics(m storage.Metrics) {
 	sm.RdbWriteStallNanos.Update(m.WriteStallDuration.Nanoseconds())
 	sm.DiskSlow.Update(m.DiskSlowCount)
 	sm.DiskStalled.Update(m.DiskStallCount)
+	sm.IterBlockBytes.Update(int64(m.Iterator.BlockBytes))
+	sm.IterBlockBytesInCache.Update(int64(m.Iterator.BlockBytesInCache))
+	sm.IterBlockReadDuration.Update(int64(m.Iterator.BlockReadDuration))
+	sm.IterExternalSeeks.Update(int64(m.Iterator.ExternalSeeks))
+	sm.IterExternalSteps.Update(int64(m.Iterator.ExternalSteps))
+	sm.IterInternalSeeks.Update(int64(m.Iterator.InternalSeeks))
+	sm.IterInternalSteps.Update(int64(m.Iterator.InternalSteps))
+	sm.StorageCompactionsPinnedKeys.Update(int64(m.Snapshots.PinnedKeys))
+	sm.StorageCompactionsPinnedBytes.Update(int64(m.Snapshots.PinnedSize))
 	sm.SharedStorageBytesRead.Update(m.SharedStorageReadBytes)
 	sm.SharedStorageBytesWritten.Update(m.SharedStorageWriteBytes)
 	sm.RdbL0Sublevels.Update(int64(m.Levels[0].Sublevels))

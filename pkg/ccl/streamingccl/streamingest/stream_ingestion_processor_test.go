@@ -37,7 +37,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/keysutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/storageutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -364,7 +363,7 @@ func assertEqualKVs(
 	tableID int,
 	partitionTimestamp hlc.Timestamp,
 ) {
-	key := keysutils.TestingSQLCodec.TablePrefix(uint32(tableID))
+	key := keys.TODOSQLCodec.TablePrefix(uint32(tableID))
 
 	// Iterate over the store.
 	store := tc.GetFirstStoreFromServer(t, 0)

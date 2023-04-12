@@ -113,6 +113,10 @@ type Builder struct {
 	// are referenced multiple times in the same query.
 	views map[cat.View]*tree.Select
 
+	// sourceViews contains a map with all the views in the current data source
+	// chain. It is used to detect circular dependencies.
+	sourceViews map[string]struct{}
+
 	// subquery contains a pointer to the subquery which is currently being built
 	// (if any).
 	subquery *subquery
@@ -309,6 +313,12 @@ func (b *Builder) buildStmt(
 		switch stmt := stmt.(type) {
 		case *tree.Select:
 		case tree.SelectStatement:
+		case *tree.Delete:
+			panic(unimplemented.NewWithIssuef(87289, "%s usage inside a function definition", stmt.StatementTag()))
+		case *tree.Insert:
+			panic(unimplemented.NewWithIssuef(87289, "%s usage inside a function definition", stmt.StatementTag()))
+		case *tree.Update:
+			panic(unimplemented.NewWithIssuef(87289, "%s usage inside a function definition", stmt.StatementTag()))
 		default:
 			panic(unimplemented.Newf("user-defined functions", "%s usage inside a function definition", stmt.StatementTag()))
 		}

@@ -1330,8 +1330,7 @@ var varGen = map[string]sessionVar{
 	`ssl`: {
 		Hidden: true,
 		Get: func(evalCtx *extendedEvalContext, _ *kv.Txn) (string, error) {
-			insecure := evalCtx.ExecCfg.RPCContext.Config.Insecure || evalCtx.ExecCfg.RPCContext.Config.AcceptSQLWithoutTLS
-			return formatBoolAsPostgresSetting(!insecure), nil
+			return formatBoolAsPostgresSetting(evalCtx.SessionData().IsSSL), nil
 		},
 	},
 
@@ -1518,6 +1517,34 @@ var varGen = map[string]sessionVar{
 			return "off", nil
 		},
 		// Setting is done by the SetTracing statement.
+	},
+
+	// CockroachDB extension.
+	`disable_drop_tenant`: {
+		Hidden: true,
+		Get: func(evalCtx *extendedEvalContext, _ *kv.Txn) (string, error) {
+			return formatBoolAsPostgresSetting(evalCtx.SessionData().DisableDropTenant), nil
+		},
+		Set: func(_ context.Context, m sessionDataMutator, s string) error {
+			b, err := paramparse.ParseBoolVar("disable_drop_tenant", s)
+			if err != nil {
+				return err
+			}
+			m.SetDisableDropTenant(b)
+			return nil
+		},
+		GlobalDefault: func(sv *settings.Values) string {
+			// Note:
+			// - We use a cluster setting here instead of a default role option
+			//   because we need this to be settable also for the 'admin' role.
+			// - The cluster setting is named "enable" because boolean cluster
+			//   settings are all ".enabled" -- we do not have ".disabled"
+			//   settings anywhere.
+			// - The session var is named "disable_" because we want the Go
+			//   default value (false) to mean that tenant deletion is enabled.
+			//   This is needed for backward-compatibility with Cockroach Cloud.
+			return formatBoolAsPostgresSetting(!enableDropTenant.Get(sv))
+		},
 	},
 
 	// CockroachDB extension.
@@ -2382,7 +2409,7 @@ var varGen = map[string]sessionVar{
 		Get: func(evalCtx *extendedEvalContext, _ *kv.Txn) (string, error) {
 			return formatBoolAsPostgresSetting(evalCtx.SessionData().CopyFromRetriesEnabled), nil
 		},
-		GlobalDefault: globalFalse,
+		GlobalDefault: globalTrue,
 	},
 
 	// CockroachDB extension.
@@ -2620,6 +2647,23 @@ var varGen = map[string]sessionVar{
 		GlobalDefault: func(sv *settings.Values) string {
 			return formatBoolAsPostgresSetting(execinfra.UseStreamerEnabled.Get(sv))
 		},
+	},
+
+	// CockroachDB extension.
+	`multiple_active_portals_enabled`: {
+		GetStringVal: makePostgresBoolGetStringValFn(`multiple_active_portals_enabled`),
+		Set: func(_ context.Context, m sessionDataMutator, s string) error {
+			b, err := paramparse.ParseBoolVar("multiple_active_portals_enabled", s)
+			if err != nil {
+				return err
+			}
+			m.SetMultipleActivePortalsEnabled(b)
+			return nil
+		},
+		Get: func(evalCtx *extendedEvalContext, _ *kv.Txn) (string, error) {
+			return formatBoolAsPostgresSetting(evalCtx.SessionData().MultipleActivePortalsEnabled), nil
+		},
+		GlobalDefault: globalFalse,
 	},
 }
 

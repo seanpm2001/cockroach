@@ -79,11 +79,25 @@ func TestLogic_mixed_version_can_login(
 	runLogicTest(t, "mixed_version_can_login")
 }
 
+func TestLogic_mixed_version_database_role_settings_role_id(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "mixed_version_database_role_settings_role_id")
+}
+
 func TestLogic_mixed_version_external_connections_owner_id(
 	t *testing.T,
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "mixed_version_external_connections_owner_id")
+}
+
+func TestLogic_mixed_version_insights_queries(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "mixed_version_insights_queries")
 }
 
 func TestLogic_mixed_version_new_system_privileges(
@@ -93,9 +107,23 @@ func TestLogic_mixed_version_new_system_privileges(
 	runLogicTest(t, "mixed_version_new_system_privileges")
 }
 
+func TestLogic_mixed_version_range_tombstones(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "mixed_version_range_tombstones")
+}
+
 func TestLogic_mixed_version_role_members_user_ids(
 	t *testing.T,
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "mixed_version_role_members_user_ids")
+}
+
+func TestLogic_mixed_version_system_privileges_user_id(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "mixed_version_system_privileges_user_id")
 }
